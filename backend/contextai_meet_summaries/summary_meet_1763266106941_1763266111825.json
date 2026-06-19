@@ -1,8 +1,0 @@
-{
-  "id": "summary_meet_1763266106941_1763266111825",
-  "transcriptId": "meet_1763266106941",
-  "transcriptName": "test 3",
-  "summary": "Here's a concise summary of the Google Meet transcript:\n\n**📊 Overview**\n*   **Meeting purpose:** To review and approve an updated dashboard before deployment.\n*   **Key participants:** Alice, Bob, Charlie, Diana.\n\n**📋 Main Topics**\n*   **Dashboard Updates:** Review of recent changes including cleaner summary cards, reduced text density, platform badges, and a responsive grid for improved spacing.\n*   **User Experience Feedback:** Discussion on the speed of the \"View Full\" button transition on older laptops and the need for a warning icon on the delete confirmation dialog.\n\n**✅ Action Items**\n*   **Decision:** Lower the transition duration for the \"View Full\" button from 300ms to 200ms. (Alice to implement/confirm).\n*   **Decision:** Add a warning icon to the delete confirmation dialog. (Bob to implement).\n*   **Next Step:** The dashboard is approved for demo and deployment.\n\n**💡 Key Takeaways**\n*   The dashboard updates have improved visual clarity and responsiveness.\n*   Performance on older devices and clarity of confirmation steps are critical for user experience.\n*   The team is ready to proceed with the demo and deployment after minor adjustments.",
-  "analysisDepth": "moderate",
-  "analyzedAt": "2025-11-16T04:08:31.825Z"
-}

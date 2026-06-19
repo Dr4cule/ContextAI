@@ -1,6 +1,6 @@
 # ContextAI
 
-A WhatsApp chat analysis platform with AI-powered summaries, intelligent bot responses, and multi-key load balancing. Analyzes group and individual chats using Google's Gemini 2.5 Flash, with support for image understanding and conversation memory.
+A chat-intelligence platform for **WhatsApp and Discord** with AI-powered summaries, intelligent bot responses, and an optional RAG knowledge base. Runs entirely on **Ollama** — using the `minimax-m3:cloud` reasoning model (text + vision) on `localhost:11434` by default — with multi-host load balancing and failover. No proprietary API keys required.
 
 ## What It Does
 
@@ -8,27 +8,29 @@ This tool connects to WhatsApp Web and provides:
 
 - **AI Chat Summaries**: Analyze up to 1000 messages with deep or moderate analysis modes
 - **Intelligent Bot Mode**: Auto-responds in enabled groups with personality-based responses
-- **Image Analysis**: Uses Gemini Vision to understand and respond to images
+- **Image Analysis**: Uses `minimax-m3`'s vision capability to understand and respond to images
 - **Q&A System**: Ask questions about specific chats or across your entire chat history
-- **Multi-Key Load Balancing**: Distributes API load across unlimited Gemini keys with intelligent failover
+- **Multi-Host Load Balancing**: Distributes AI load across multiple Ollama servers with intelligent failover
 - **Conversation Memory**: Bot maintains context across 50 messages per chat
+- **RAG Knowledge Base**: Optional retrieval-augmented Q&A — works out of the box with a built-in vector store (no database required), or PostgreSQL + pgvector when available
 
 ## Technical Implementation
 
 ### Interesting Techniques
 
 - **[Promise.race](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/race) with Timeout Pattern**: Chat fetching uses race conditions to handle WhatsApp's sync delays after reconnection (up to 60s timeout)
-- **Round-Robin Load Balancing**: Cycles through multiple API keys with automatic failover when quota limits hit
+- **Round-Robin Load Balancing**: Cycles through multiple Ollama hosts with automatic failover when one is overloaded or down
 - **Queue-Based Concurrency Control**: Limits simultaneous AI requests to prevent rate limiting while maintaining priority ordering
 - **[LocalStorage](https://developer.mozilla.org/en-US/docs/Web/API/Window/localStorage) Caching Strategy**: Persists chat lists, summaries, and Q&A history across sessions
-- **Exponential Backoff with Multi-Key Cycling**: Retries failed API calls by cycling through all available keys before waiting
+- **Exponential Backoff with Multi-Host Cycling**: Retries failed AI calls by cycling through all available Ollama hosts before waiting
 - **Dynamic CSS Grid Layouts**: Responsive three-column layout using [CSS Grid](https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_grid_layout)
 - **Real-time Status Polling**: Uses [setInterval](https://developer.mozilla.org/en-US/docs/Web/API/setInterval) for connection monitoring
 
 ### Key Technologies
 
 - **[whatsapp-web.js](https://github.com/pedroslopez/whatsapp-web.js)** - WhatsApp Web API wrapper using Puppeteer
-- **[Google Generative AI](https://www.npmjs.com/package/@google/generative-ai)** - Gemini 2.5 Flash for text and vision models
+- **[Ollama](https://ollama.com/)** - Local/cloud LLM runtime serving `minimax-m3:cloud` (text + vision)
+- **[discord.js](https://discord.js.org/)** - Discord bot integration
 - **[sharp](https://sharp.pixelplumbing.com/)** - Image processing for media handling
 - **[Vite](https://vitejs.dev/)** - Frontend build tool with hot module replacement
 - **[React Router](https://reactrouter.com/)** - Client-side routing for multi-page navigation
@@ -44,21 +46,24 @@ This tool connects to WhatsApp Web and provides:
 ```
 ContextAI/
 ├── backend/
-│   ├── whatsapp_ui/          # React frontend
+│   ├── whatsapp_ui/          # React frontend (Vite)
 │   │   ├── src/
 │   │   │   ├── pages/        # Route components
 │   │   │   ├── App.jsx       # Root component
 │   │   │   └── styles.css    # Global styles
 │   │   ├── package.json
 │   │   └── vite.config.js
-│   ├── .wwebjs_auth/         # WhatsApp session storage
-│   ├── .wwebjs_cache/        # WhatsApp cache
-│   ├── whatsapp_api.js       # Main backend API
+│   ├── llm.js                # Shared Ollama client (Gemini-compatible API)
+│   ├── whatsapp_api.js       # WhatsApp backend API  (port 8002)
+│   ├── discord_api.js        # Discord backend       (port 8004)
 │   ├── bot_config.json       # Bot group configuration
 │   ├── package.json
-│   └── .env                  # Environment variables
+│   └── .env                  # Environment variables (optional)
+├── server/                   # RAG ingestion + retrieval (port 3000)
+│   ├── index.js
+│   ├── vectorStore.js        # File-backed vector store (no-DB fallback)
+│   └── package.json
 ├── .env.example              # Template for environment setup
-├── docker-compose.yml
 └── README.md
 ```
 
@@ -66,7 +71,11 @@ ContextAI/
 
 **[`backend/.wwebjs_auth/`](backend/.wwebjs_auth/)** - WhatsApp Web session files generated by whatsapp-web.js. Contains authentication state and prevents re-scanning QR codes.
 
-**[`backend/whatsapp_api.js`](backend/whatsapp_api.js)** - Express API server handling WhatsApp integration, AI processing, and bot responses. Implements queue-based concurrency control and multi-key load balancing.
+**[`backend/whatsapp_api.js`](backend/whatsapp_api.js)** - Express API server handling WhatsApp integration, AI processing, and bot responses. Implements queue-based concurrency control and multi-host load balancing.
+
+**[`backend/llm.js`](backend/llm.js)** - Shared Ollama client used by all backends and the RAG server. Exposes a Gemini-compatible interface (`generateContent` / `embedContent`) and handles host round-robin, failover, and vision routing.
+
+**[`server/`](server/)** - RAG ingestion + retrieval service. Uses a file-backed vector store by default; PostgreSQL + pgvector when `DATABASE_URL` is set.
 
 **[`backend/bot_config.json`](backend/bot_config.json)** - Bot configuration including enabled groups and personality assignments.
 
@@ -75,8 +84,8 @@ ContextAI/
 ### Prerequisites
 
 - Node.js 18+ and npm
-- Google Gemini API keys ([Get them here](https://aistudio.google.com/app/apikey))
-- WhatsApp account
+- One or more [Ollama](https://ollama.com/) servers reachable on your network, each serving the models below. The app defaults to a single local server at `http://localhost:11434`; add more hosts to `OLLAMA_HOSTS` for round-robin / failover.
+- WhatsApp account (for the WhatsApp feature)
 
 ### Installation
 
@@ -99,30 +108,35 @@ ContextAI/
    cd ..
    ```
 
-4. **Configure environment variables**
-   
-   Copy `.env.example` to `.env` in the `backend` directory:
+4. **Configure environment variables** *(optional)*
+
+   The app runs with sensible defaults and **needs no `.env`**. To point at
+   different Ollama servers, copy `.env.example` to `backend/.env`:
    ```bash
-   cp .env.example .env
+   cp .env.example backend/.env
    ```
-   
-   Edit `.env` and add your Gemini API keys:
    ```env
-   GEMINI_API_KEY=your_primary_key_here
-   GEMINI_API_KEY_2=your_second_key_here
-   GEMINI_API_KEY_3=your_third_key_here
+   OLLAMA_HOSTS=http://localhost:11434
+   # OLLAMA_TEXT_MODEL=minimax-m3:cloud
+   # DISCORD_BOT_TOKEN=...        # only for the Discord bot
+   # DATABASE_URL=...             # only if you want Postgres-backed RAG
    ```
-   
-   You can add up to 5 keys by default (or unlimited by modifying [`whatsapp_api.js`](backend/whatsapp_api.js)).
 
-5. **Start the backend server**
+5. **(Optional) Start the RAG server** — enables cross-source Q&A
    ```bash
-   node whatsapp_api.js
+   cd server && npm install && node index.js   # http://localhost:3000
    ```
-   
-   The API server starts on `http://localhost:8002`
+   Works out of the box with a file-backed vector store; uses Postgres+pgvector
+   automatically if `DATABASE_URL` is set and reachable.
 
-6. **Start the frontend** (in a new terminal)
+6. **Start the backend servers**
+   ```bash
+   cd backend
+   node whatsapp_api.js     # WhatsApp  -> http://localhost:8002
+   node discord_api.js      # Discord   -> http://localhost:8004 (needs DISCORD_BOT_TOKEN)
+   ```
+
+7. **Start the frontend** (in a new terminal)
    ```bash
    cd backend/whatsapp_ui
    npm run dev
@@ -130,7 +144,7 @@ ContextAI/
    
    The UI opens at `http://localhost:5173`
 
-7. **Authenticate with WhatsApp**
+8. **Authenticate with WhatsApp**
    
    - Open `http://localhost:5173` in your browser
    - Scan the QR code with WhatsApp on your phone (Settings → Linked Devices)
@@ -152,23 +166,30 @@ Bot responds when:
 - Someone replies to its messages
 - Asked to summarize recent messages
 
-## API Key Management
+## AI Engine (Ollama)
 
-The system supports unlimited API keys with automatic load balancing:
+All AI runs through the shared [`backend/llm.js`](backend/llm.js) client, which load-balances
+across every host in `OLLAMA_HOSTS` and fails over automatically.
 
-**Check key status:**
+**Check engine + host status:**
 ```bash
 curl http://localhost:8002/api/keys/status
 ```
-
-**Add keys dynamically (no restart needed):**
-```bash
-curl -X POST http://localhost:8002/api/keys/add \
-  -H "Content-Type: application/json" \
-  -d '{"apiKey": "AIzaSy..."}'
+Returns the active models and per-host reachability:
+```json
+{
+  "engine": "ollama",
+  "textModel": "minimax-m3:cloud",
+  "visionModel": "minimax-m3:cloud",
+  "embedModel": "nomic-embed-text:latest",
+  "hosts": [
+    { "host": "http://localhost:11434", "reachable": true, "models": ["minimax-m3:cloud", "..."] }
+  ]
+}
 ```
 
-See [`API_KEYS_GUIDE.md`](backend/API_KEYS_GUIDE.md) for detailed key management.
+**Add or change hosts:** edit `OLLAMA_HOSTS` (comma-separated) in `backend/.env` and restart.
+Vision requests are automatically routed to a host that actually has the vision model.
 
 ## Features
 
@@ -191,7 +212,7 @@ Ask questions across all analyzed chats with consolidated AI responses.
 
 ## Performance
 
-- **Success Rate**: ~95-99% with 3 API keys, ~99.9% with 5+ keys
+- **Success Rate**: high availability via multi-host failover (add more Ollama hosts to `OLLAMA_HOSTS` for redundancy)
 - **Chat Load Time**: 2-5 seconds for 500 chats (after initial sync)
 - **Analysis Speed**: 3-10 seconds per 100 messages (depending on API load)
 - **Concurrent Requests**: 2 simultaneous AI calls with automatic queuing

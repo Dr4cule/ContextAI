@@ -12,7 +12,7 @@ const qrcode = require("qrcode");
 const fs = require("fs");
 const fsPromises = require("fs").promises;
 const path = require("path");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { createModel, getStatus, HOSTS, TEXT_MODEL } = require("./llm");
 const sharp = require("sharp");
 
 const axios = require("axios");
@@ -31,6 +31,9 @@ let client = null;
 let isReady = false;
 let currentQR = null;
 let allChats = [];
+let chatFetchPromise = null;
+let chatFetchStartedAt = null;
+let lastChatFetchError = null;
 let isLoggingOut = false;
 let isReconnecting = false; // Track if this is a reconnect/re-login
 let botStartTime = null; // Track when bot started to ignore old messages
@@ -48,75 +51,54 @@ let isProcessingQueue = false;
 const MAX_CONCURRENT_AI_REQUESTS = 2; // Process 2 requests at a time
 let activeAIRequests = 0;
 
-// Initialize Gemini AI with dynamic multi-key load balancing
-const geminiAPIKeys = [];
-const geminiModels = [];
+// Initialize the AI engine: Ollama (minimax-m3:cloud) with one model
+// handle per host for round-robin load balancing + cross-host failover.
+// Each handle is pinned to a host but still fails over to the others, so the
+// existing retry/cycling logic keeps working - it now cycles hosts, not keys.
+const geminiModels = HOSTS.map((host) => createModel({ host }));
 let currentModelIndex = 0;
 
-// Load API keys from environment variables (supports unlimited keys)
-// You can add more by setting GEMINI_API_KEY_4, GEMINI_API_KEY_5, etc.
-if (process.env.GEMINI_API_KEY) {
-  geminiAPIKeys.push(process.env.GEMINI_API_KEY);
-}
-if (process.env.GEMINI_API_KEY_2) {
-  geminiAPIKeys.push(process.env.GEMINI_API_KEY_2);
-}
-if (process.env.GEMINI_API_KEY_3) {
-  geminiAPIKeys.push(process.env.GEMINI_API_KEY_3);
-}
-if (process.env.GEMINI_API_KEY_4) {
-  geminiAPIKeys.push(process.env.GEMINI_API_KEY_4);
-}
-if (process.env.GEMINI_API_KEY_5) {
-  geminiAPIKeys.push(process.env.GEMINI_API_KEY_5);
-}
-
-// Initialize all models
-if (geminiAPIKeys.length === 0) {
-  console.warn("⚠️ No GEMINI_API_KEY found - AI summarization disabled");
+if (geminiModels.length === 0) {
+  console.warn("⚠️ No OLLAMA_HOSTS configured - AI summarization disabled");
 } else {
-  geminiAPIKeys.forEach((key, index) => {
-    try {
-      const genAI = new GoogleGenerativeAI(key);
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash-lite",
-      });
-      geminiModels.push(model);
-      console.log(
-        `🤖 Gemini AI #${index + 1} initialized (${key.substring(
-          0,
-          20
-        )}...${key.substring(key.length - 4)})`
-      );
-    } catch (err) {
-      console.error(
-        `❌ Failed to initialize API key #${index + 1}:`,
-        err.message
-      );
-    }
+  HOSTS.forEach((host, index) => {
+    console.log(`🤖 Ollama AI #${index + 1} -> ${host} (${TEXT_MODEL})`);
   });
-
-  console.log(
-    `✅ Total active API keys: ${geminiModels.length}/${geminiAPIKeys.length}`
-  );
+  console.log(`✅ Total active Ollama hosts: ${geminiModels.length}`);
 }
 
-// Get next available model (round-robin load balancing)
+// Get next available model (round-robin load balancing across hosts)
 function getGeminiModel() {
   if (geminiModels.length === 0) {
     return null;
   }
 
-  // Round-robin through all available models
+  // Round-robin through all available hosts
   currentModelIndex = (currentModelIndex + 1) % geminiModels.length;
   const model = geminiModels[currentModelIndex];
   console.log(
-    `   🔄 Using Gemini API #${currentModelIndex + 1} of ${geminiModels.length}`
+    `   🔄 Using Ollama host #${currentModelIndex + 1} of ${geminiModels.length}`
   );
   return model;
 }
 
-// Helper function to format timestamps as "X ago"
+// AI engine status endpoint (Ollama hosts + models). Mounted at both
+// /api/keys/status (legacy alias) and /api/ai/status so existing frontends
+// keep working while the docs use the consistent name.
+app.get("/api/ai/status", async (req, res) => {
+  try {
+    res.json(await getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.get("/api/keys/status", async (req, res) => {
+  try {
+    res.json(await getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 function getTimeAgo(timestamp) {
   const now = Date.now() / 1000; // Current time in seconds
   const seconds = Math.floor(now - timestamp);
@@ -128,7 +110,7 @@ function getTimeAgo(timestamp) {
   return `${Math.floor(seconds / 604800)}w ago`;
 }
 
-// Helper function to analyze images using Gemini Vision
+// Helper function to analyze images using Ollama vision (minimax-m3)
 async function analyzeImage(message, context = "", personality = null) {
   try {
     if (!message.hasMedia) return null;
@@ -136,15 +118,15 @@ async function analyzeImage(message, context = "", personality = null) {
     const media = await message.downloadMedia();
     if (!media || !media.mimetype.startsWith("image/")) return null;
 
-    console.log("🖼️ Image detected, analyzing with Gemini Vision...");
+    console.log("🖼️ Image detected, analyzing with Ollama vision (minimax-m3)...");
 
     const model = getGeminiModel();
     if (!model) {
-      console.log("   ⚠️ No Gemini model available for vision analysis");
+      console.log("   ⚠️ No AI model available for vision analysis");
       return null;
     }
 
-    // Prepare image for Gemini
+    // Prepare image (base64 + mime); llm.js routes this to a vision-capable host
     const imagePart = {
       inlineData: {
         data: media.data,
@@ -300,7 +282,14 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 2000) {
         error.message.includes("429") ||
         error.message.includes("Internal Server Error") ||
         error.message.includes("internal error") ||
-        error.message.includes("RESOURCE_EXHAUSTED");
+        error.message.includes("RESOURCE_EXHAUSTED") ||
+        // Transient Ollama connectivity (cold cloud proxy, brief restart)
+        error.message.includes("fetch failed") ||
+        error.message.includes("ECONNREFUSED") ||
+        error.message.includes("ECONNRESET") ||
+        error.message.includes("ETIMEDOUT") ||
+        error.message.includes("socket hang up") ||
+        error.message.includes("aborted");
 
       const isOverloaded =
         error.message.includes("overloaded") ||
@@ -717,7 +706,7 @@ Provide a clear summary in 3-5 bullet points.`;
         const model = getGeminiModel();
         if (!model) {
           await message.reply(
-            "⚠️ AI not configured. Please set GEMINI_API_KEY."
+            "⚠️ AI engine unavailable. Check OLLAMA_HOSTS and that the Ollama server is running."
           );
           return;
         }
@@ -884,7 +873,7 @@ Respond naturally and helpfully as ${
       );
       const model = getGeminiModel();
       if (!model) {
-        await message.reply("⚠️ AI not configured. Please set GEMINI_API_KEY.");
+        await message.reply("⚠️ AI engine unavailable. Check OLLAMA_HOSTS and that the Ollama server is running.");
         return;
       }
 
@@ -974,23 +963,43 @@ Respond naturally and helpfully as ${
   return client;
 }
 
-// Cleanup auth folder safely
+// Cleanup auth folder safely and FAST.
+//
+// The session folder is a full Chromium user-data dir; deleting it directly is
+// slow on Windows (locked files) and used to block a fresh QR for tens of
+// seconds. Instead we rename it out of the way (near-instant) so a new client
+// can start immediately, then delete the old copy in the background.
 async function cleanupAuthFolder() {
   const authPath = path.join(__dirname, ".wwebjs_auth");
   try {
-    // Give time for file handles to release
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const exists = await fsPromises
+      .access(authPath)
+      .then(() => true)
+      .catch(() => false);
+    if (!exists) return;
 
-    if (
-      await fsPromises
-        .access(authPath)
-        .then(() => true)
-        .catch(() => false)
-    ) {
+    const tmpPath = `${authPath}.old-${Date.now()}`;
+    try {
+      await fsPromises.rename(authPath, tmpPath);
+      // Delete the old profile in the background - don't block the new QR.
+      fsPromises
+        .rm(tmpPath, {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 400,
+        })
+        .then(() => console.log("🧹 Old session files removed"))
+        .catch((e) =>
+          console.log("⚠️ Background session cleanup warning:", e.message)
+        );
+    } catch (renameErr) {
+      // Rename can fail if handles are still open; fall back to a direct delete.
       await fsPromises.rm(authPath, {
         recursive: true,
         force: true,
-        maxRetries: 3,
+        maxRetries: 5,
+        retryDelay: 400,
       });
       console.log("🧹 Cleaned up session files");
     }
@@ -1002,59 +1011,26 @@ async function cleanupAuthFolder() {
 
 // API Endpoints
 
-// Get API key status
-app.get("/api/keys/status", (req, res) => {
-  res.json({
-    totalKeys: geminiAPIKeys.length,
-    activeModels: geminiModels.length,
-    currentIndex: currentModelIndex,
-    keys: geminiAPIKeys.map((key, idx) => ({
-      id: idx + 1,
-      keyPreview: `${key.substring(0, 20)}...${key.substring(key.length - 4)}`,
-      active: idx < geminiModels.length,
-    })),
-  });
-});
-
-// Add new API key dynamically
-app.post("/api/keys/add", (req, res) => {
-  const { apiKey } = req.body;
-
-  if (!apiKey || typeof apiKey !== "string") {
-    return res.status(400).json({ error: "Invalid API key format" });
-  }
-
-  // Check if key already exists
-  if (geminiAPIKeys.includes(apiKey)) {
-    return res.status(400).json({ error: "API key already exists" });
-  }
-
+// Get AI engine status (Ollama hosts + models)
+app.get("/api/keys/status", async (req, res) => {
   try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
-    geminiAPIKeys.push(apiKey);
-    geminiModels.push(model);
-
-    console.log(
-      `✅ New API key added: #${geminiModels.length} (${apiKey.substring(
-        0,
-        20
-      )}...${apiKey.substring(apiKey.length - 4)})`
-    );
-
+    const status = await getStatus();
     res.json({
-      success: true,
-      totalKeys: geminiAPIKeys.length,
+      ...status,
       activeModels: geminiModels.length,
-      message: `API key #${geminiModels.length} added successfully`,
+      currentIndex: currentModelIndex,
     });
   } catch (err) {
-    console.error("❌ Failed to add API key:", err.message);
-    res
-      .status(500)
-      .json({ error: "Failed to initialize API key: " + err.message });
+    res.status(500).json({ error: "Failed to read AI status: " + err.message });
   }
+});
+
+// AI hosts are configured via the OLLAMA_HOSTS env var, not at runtime.
+app.post("/api/keys/add", (req, res) => {
+  res.status(400).json({
+    error:
+      "ContextAI now uses Ollama. Configure servers via the OLLAMA_HOSTS environment variable (comma-separated, e.g. http://localhost:11434) and restart.",
+  });
 });
 
 // Get status
@@ -1063,6 +1039,8 @@ app.get("/api/status", (req, res) => {
     connected: isReady,
     hasQR: currentQR !== null,
     chatCount: allChats.length,
+    chatLoading: Boolean(chatFetchPromise),
+    chatError: lastChatFetchError,
   };
   console.log("📊 Status check:", status);
   res.json(status);
@@ -1079,22 +1057,17 @@ app.get("/api/qr", (req, res) => {
   }
 });
 
-// Get all chats (load all at once with retry logic)
-app.get("/api/chats", async (req, res) => {
+async function refreshChatsCache() {
   if (!isReady) {
-    return res.status(503).json({ error: "WhatsApp not connected" });
+    throw new Error("WhatsApp not connected");
+  }
+  if (chatFetchPromise) {
+    return chatFetchPromise;
   }
 
-  // If we already have cached chats, return immediately
-  if (allChats.length > 0) {
-    console.log(`📋 Returning ${allChats.length} cached chats`);
-    return res.json({
-      chats: allChats,
-      count: allChats.length,
-    });
-  }
-
-  try {
+  chatFetchStartedAt = Date.now();
+  lastChatFetchError = null;
+  chatFetchPromise = (async () => {
     console.log(`📋 Fetching all chats...`);
     const startTime = Date.now();
 
@@ -1104,8 +1077,8 @@ app.get("/api/chats", async (req, res) => {
 
     while (retries > 0) {
       try {
-        // Use longer timeout if recently reconnected
-        const fetchTimeout = isReconnecting ? 60000 : 45000;
+        // WhatsApp Web can take a while to finish post-login sync.
+        const fetchTimeout = isReconnecting ? 120000 : 90000;
 
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(
@@ -1120,11 +1093,15 @@ app.get("/api/chats", async (req, res) => {
       } catch (err) {
         retries--;
 
-        if (err.message.includes("Evaluation failed") && retries > 0) {
+        if (
+          (err.message.includes("Evaluation failed") ||
+            err.message.includes("Timeout fetching chats")) &&
+          retries > 0
+        ) {
           console.log(
             `   ⚠️ WhatsApp not ready, retrying... (${retries} attempts left)`
           );
-          await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2s before retry
+          await new Promise((resolve) => setTimeout(resolve, 5000));
           continue;
         }
 
@@ -1155,30 +1132,84 @@ app.get("/api/chats", async (req, res) => {
     const totalTime = Date.now() - startTime;
     console.log(`✅ Processed ${allChats.length} chats in ${totalTime}ms`);
 
-    res.json({
+    return allChats;
+  })();
+
+  try {
+    return await chatFetchPromise;
+  } catch (err) {
+    lastChatFetchError = err.message;
+    throw err;
+  } finally {
+    chatFetchPromise = null;
+    chatFetchStartedAt = null;
+  }
+}
+
+// Get all chats. Chat loading is single-flight so repeated UI polling cannot
+// pile up multiple WhatsApp Web evaluations and make the session time out.
+app.get("/api/chats", async (req, res) => {
+  if (!isReady) {
+    return res.status(503).json({ error: "WhatsApp not connected" });
+  }
+
+  if (allChats.length > 0) {
+    console.log(`📋 Returning ${allChats.length} cached chats`);
+    return res.json({
       chats: allChats,
       count: allChats.length,
-    });
-  } catch (err) {
-    console.error("❌ Error fetching chats:", err.message);
-
-    // If it's a timeout during reconnection, provide helpful message
-    if (err.message.includes("Timeout") && isReconnecting) {
-      console.log(
-        "   💡 Tip: WhatsApp is still syncing chats after reconnection. Please retry in a few seconds."
-      );
-      return res.status(503).json({
-        error: "WhatsApp is still syncing chats",
-        message: "Please wait a moment and try again",
-        reconnecting: true,
-      });
-    }
-
-    res.status(500).json({
-      error: "Failed to fetch chats",
-      message: err.message,
+      loading: Boolean(chatFetchPromise),
     });
   }
+
+  if (chatFetchPromise) {
+    return res.status(202).json({
+      chats: allChats,
+      count: allChats.length,
+      loading: true,
+      startedAt: chatFetchStartedAt,
+      message: "WhatsApp is still syncing chats. Please wait a moment.",
+    });
+  }
+
+  refreshChatsCache().catch((err) => {
+    console.error("❌ Error fetching chats:", err.message);
+  });
+
+  res.status(202).json({
+    chats: [],
+    count: 0,
+    loading: true,
+    startedAt: chatFetchStartedAt,
+    message: "Started loading WhatsApp chats.",
+  });
+});
+
+app.post("/api/chats/refresh", async (req, res) => {
+  if (!isReady) {
+    return res.status(503).json({ error: "WhatsApp not connected" });
+  }
+
+  if (chatFetchPromise) {
+    return res.status(202).json({
+      chats: allChats,
+      count: allChats.length,
+      loading: true,
+      message: "Chat refresh already running.",
+    });
+  }
+
+  allChats = [];
+  refreshChatsCache().catch((err) => {
+    console.error("❌ Error refreshing chats:", err.message);
+  });
+
+  res.status(202).json({
+    chats: [],
+    count: 0,
+    loading: true,
+    message: "Started refreshing WhatsApp chats.",
+  });
 });
 
 // Get chat messages and summary
@@ -1372,7 +1403,7 @@ This chat has no messages in the selected range (${limit} messages).
   }
 });
 
-// Generate AI summary using Gemini with batching for large message sets
+// Generate AI summary using Ollama with batching for large message sets
 async function generateAISummary(
   messages,
   chatName,
@@ -1656,7 +1687,7 @@ IMPORTANT: Put each bullet point on a NEW LINE. Do NOT continue points on same l
 
     try {
       console.log(
-        `🤖 Sending ${messages.length} messages to Gemini AI (${
+        `🤖 Sending ${messages.length} messages to Ollama AI (${
           isDeepAnalysis ? "DEEP" : "MODERATE"
         } mode)...`
       );
@@ -1673,12 +1704,12 @@ IMPORTANT: Put each bullet point on a NEW LINE. Do NOT continue points on same l
       const response = await result.response;
       summaryText = response.text();
       console.log(
-        `✅ Gemini AI summary generated successfully (${
+        `✅ Ollama AI summary generated successfully (${
           isDeepAnalysis ? "DEEP" : "MODERATE"
         } mode)`
       );
     } catch (err) {
-      console.error("❌ Gemini AI error:", err.message);
+      console.error("❌ Ollama AI error:", err.message);
       return null;
     }
   }
@@ -1746,7 +1777,7 @@ app.post("/api/chat-qa", async (req, res) => {
 app.post("/api/dashboard-qa", async (req, res) => {
   const model = getGeminiModel();
   if (!model) {
-    return res.status(503).json({ error: "Gemini AI not configured" });
+    return res.status(503).json({ error: "AI engine not configured (check OLLAMA_HOSTS)" });
   }
 
   const { summaries, question } = req.body;
@@ -1810,7 +1841,7 @@ INSTRUCTIONS:
 
 ANSWER:`;
 
-    console.log("🤖 Sending dashboard Q&A to Gemini AI...");
+    console.log("🤖 Sending dashboard Q&A to Ollama AI...");
     const result = await queueAIRequest(async () => {
       const model = getGeminiModel();
       return await retryWithBackoff(
@@ -1848,38 +1879,48 @@ app.post("/api/logout", async (req, res) => {
     return res.json({ success: true, message: "Already logged out" });
   }
 
+  // Respond immediately - the teardown + fresh-client init runs in the
+  // background and the new QR appears via the normal /api/status polling.
+  // This is what makes logout feel instant instead of "forever".
+  res.json({ success: true, message: "Logging out..." });
+
+  isLoggingOut = true;
+  isReady = false;
+  allChats = [];
+  currentQR = null;
+  console.log("👋 User requested logout...");
+
+  const oldClient = client;
   try {
-    isLoggingOut = true;
-    isReconnecting = true; // Mark as reconnecting for longer initialization delay
-    isReady = false;
-    allChats = [];
-    currentQR = null;
-
-    console.log("👋 User requested logout...");
-
-    // Destroy client
-    await client.destroy();
-
-    console.log("⏳ Waiting for cleanup...");
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-
-    // Clean up session files
-    await cleanupAuthFolder();
-
-    console.log("🔄 Reinitializing WhatsApp client...");
-
-    // Reinitialize for next login
-    isLoggingOut = false; // Reset flag before reinit
-    initializeClient();
-    client.initialize();
-
-    res.json({ success: true, message: "Logged out successfully" });
+    // logout() properly unlinks the device on the user's phone. Time-box it so
+    // a hung session can't stall the whole flow, then destroy the browser.
+    await Promise.race([
+      oldClient.logout().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 8000)),
+    ]);
   } catch (err) {
-    console.error("Logout error:", err);
-    isLoggingOut = false; // Reset on error
-    isReconnecting = false;
-    res.status(500).json({ error: err.message });
+    console.log("⚠️ logout() warning:", err.message);
   }
+
+  try {
+    await oldClient.destroy();
+  } catch (err) {
+    console.log("⚠️ destroy() warning:", err.message);
+  }
+
+  // Clear session files (fast, background delete) for a fresh QR.
+  await cleanupAuthFolder();
+
+  // A fresh logout->login is NOT a reconnect, so skip the long post-scan
+  // stabilization delay (the new login does its own chat sync anyway).
+  isLoggingOut = false;
+  isReconnecting = false;
+
+  console.log("🔄 Reinitializing WhatsApp client for next login...");
+  initializeClient();
+  client.initialize().catch((err) => {
+    console.error("❌ Re-init error after logout:", err.message);
+  });
 });
 
 // Bot configuration endpoints
@@ -2392,7 +2433,7 @@ async function checkBotMessages() {
         const model = getGeminiModel();
         if (!model) {
           await mostRecentMention.reply(
-            "⚠️ AI not configured. Please set GEMINI_API_KEY."
+            "⚠️ AI engine unavailable. Check OLLAMA_HOSTS and that the Ollama server is running."
           );
           continue;
         }
@@ -2515,8 +2556,26 @@ Respond naturally - prioritize being helpful. If they ask about previous message
 // Start polling every 10 seconds
 setInterval(checkBotMessages, 10000);
 
-// Serve static files (web UI)
-app.use("/ui", express.static("whatsapp_ui"));
+// Serve built web UI when available. Falling back to the source folder keeps
+// the endpoint useful before the first `npm run build`, but production should
+// use whatsapp_ui/dist because Vite source modules are not served by Express.
+const uiDistPath = path.join(__dirname, "whatsapp_ui", "dist");
+const uiSourcePath = path.join(__dirname, "whatsapp_ui");
+const uiStaticPath = fs.existsSync(uiDistPath) ? uiDistPath : uiSourcePath;
+
+app.get("/", (req, res) => res.redirect("/ui/"));
+app.get(["/whatsapp", "/wathsapp"], (req, res) =>
+  res.redirect("/ui/whatsapp")
+);
+
+app.use("/ui", express.static(uiStaticPath));
+app.use("/ui", (req, res, next) => {
+  if (req.method !== "GET" || path.extname(req.path)) return next();
+
+  const indexPath = path.join(uiStaticPath, "index.html");
+  if (fs.existsSync(indexPath)) return res.sendFile(indexPath);
+  return next();
+});
 
 // Start server
 const PORT = 8002;
@@ -2554,6 +2613,9 @@ try {
 }
 
 // Graceful shutdown
+// IMPORTANT: do NOT delete the auth folder here - stopping the server must keep
+// the saved session so the next start restores login without a new QR scan.
+// (The session is only cleared on an explicit /api/logout.)
 process.on("SIGINT", async () => {
   console.log("\n\n👋 Shutting down gracefully...");
   try {
@@ -2561,10 +2623,9 @@ process.on("SIGINT", async () => {
     if (client) {
       await client.destroy();
     }
-    await cleanupAuthFolder();
-    console.log("✅ Cleanup complete");
+    console.log("✅ Shutdown complete (session preserved)");
   } catch (err) {
-    console.log("⚠️ Cleanup warning:", err.message);
+    console.log("⚠️ Shutdown warning:", err.message);
   }
   process.exit(0);
 });

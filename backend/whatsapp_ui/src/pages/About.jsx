@@ -8,9 +8,11 @@ export default function About(){
       <section className="about-section">
         <h3>🎯 What is ContextAI?</h3>
         <p>
-          ContextAI is an intelligent chat analysis platform that transforms your WhatsApp conversations 
-          into actionable insights. Using advanced AI technology, we summarize lengthy chat histories, 
-          extract key information, analyze participant behavior, and provide interactive Q&A capabilities.
+          ContextAI is an intelligent chat-analysis platform that transforms your conversations across
+          <strong> WhatsApp and Discord</strong> into actionable insights. Running entirely on
+          local/cloud <strong>Ollama</strong> models, it summarizes lengthy histories, extracts key
+          information, analyzes participant behavior, and powers interactive Q&A — with no proprietary API
+          keys required.
         </p>
       </section>
 
@@ -41,13 +43,13 @@ export default function About(){
           </div>
           <div className="tech-item">
             <div className="tech-icon">🤖</div>
-            <div className="tech-name">Gemini AI</div>
-            <div className="tech-desc">Google's advanced AI model</div>
+            <div className="tech-name">Ollama · MiniMax-M3</div>
+            <div className="tech-desc">minimax-m3 reasoning + vision model</div>
           </div>
           <div className="tech-item">
             <div className="tech-icon">💬</div>
-            <div className="tech-name">WhatsApp Web.js</div>
-            <div className="tech-desc">WhatsApp integration</div>
+            <div className="tech-name">WhatsApp · Discord</div>
+            <div className="tech-desc">Multi-platform integration</div>
           </div>
           <div className="tech-item">
             <div className="tech-icon">🎨</div>
@@ -91,6 +93,11 @@ export default function About(){
             <span className="api-desc">Ask questions about chat</span>
           </div>
           <div className="api-item">
+            <code className="api-method">GET</code>
+            <code className="api-path">/api/keys/status</code>
+            <span className="api-desc">Ollama hosts &amp; model status</span>
+          </div>
+          <div className="api-item">
             <code className="api-method">POST</code>
             <code className="api-path">/api/logout</code>
             <span className="api-desc">Logout from WhatsApp</span>
@@ -130,15 +137,15 @@ export default function About(){
       <section className="about-section">
         <h3>🎨 Design Philosophy</h3>
         <p>
-          ContextAI features a retro-futuristic design with <strong>"Press Start 2P"</strong> pixel font 
-          and glassmorphism effects. The purple-gold gradient theme creates a modern yet nostalgic aesthetic, 
-          perfect for a hackathon project that stands out.
+          ContextAI pairs a retro-futuristic identity — the <strong>"Press Start 2P"</strong> pixel font on
+          the brand, navigation and headings — with a clean, highly readable <strong>Inter</strong> body type
+          and glassmorphism effects. The purple-gold gradient theme creates a modern yet nostalgic aesthetic.
         </p>
       </section>
 
       <footer className="about-footer">
         <p>Crafted with ❤️ by Team Gear5</p>
-        <p className="muted">Neil Gogte Institute of Technology • 2025</p>
+        <p className="muted">Neil Gogte Institute of Technology • 2026</p>
       </footer>
     </div>
   )

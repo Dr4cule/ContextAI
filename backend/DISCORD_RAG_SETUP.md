@@ -23,7 +23,7 @@ Discord Message → discord_api.js → RAG Server (localhost:3000) → PostgreSQ
 When you ask a question about a **mapped** channel:
 
 ```
-Question → discord_api.js → RAG Server → Vector DB → Gemini AI → Answer
+Question → discord_api.js → RAG Server → Vector DB → Ollama → Answer
 ```
 
 ### 3. Fallback for Unmapped Channels
@@ -31,7 +31,7 @@ Question → discord_api.js → RAG Server → Vector DB → Gemini AI → Answe
 For channels NOT in `discord_mapping.json`:
 
 - Messages are NOT sent to RAG
-- Q&A uses Gemini with the summary only (like before)
+- Q&A uses Ollama with the summary only (like before)
 
 ## Configuration
 
@@ -89,7 +89,7 @@ Map Discord channels to projects/teams:
 
 - [x] Auto-ingest Discord messages to RAG
 - [x] RAG-powered Q&A for mapped channels
-- [x] Fallback to Gemini for unmapped channels
+- [x] Fallback to Ollama for unmapped channels
 - [x] Real-time message vectorization
 - [x] Cross-platform knowledge retrieval
 
@@ -225,6 +225,6 @@ node discord_api.js
 ## Notes
 
 - Each mapped channel costs tokens for embeddings
-- Unmapped channels still work with Gemini fallback
+- Unmapped channels still work with Ollama fallback
 - RAG provides better context-aware answers
 - Messages are stored permanently in vector DB

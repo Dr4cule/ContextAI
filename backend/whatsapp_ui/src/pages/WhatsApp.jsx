@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
+import { useJobs } from '../state/jobsStore'
 
 export default function WhatsApp() {
   const [status, setStatus] = useState({ connected: false })
@@ -17,13 +18,12 @@ export default function WhatsApp() {
   const [viewedSummaries, setViewedSummaries] = useState(() => {
     try { return JSON.parse(localStorage.getItem('contextai_viewed_summaries') || '{}') } catch (e) { return {} }
   })
-  const [loadingChats, setLoadingChats] = useState({})
   const [messageLimit, setMessageLimit] = useState(100)
   const [question, setQuestion] = useState('')
   const [askingQuestion, setAskingQuestion] = useState(false)
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
-  
+
   // Bot mode state
   const [botEnabled, setBotEnabled] = useState(() => {
     try { return JSON.parse(localStorage.getItem('contextai_bot_enabled') || 'false') } catch (e) { return false }
@@ -38,6 +38,22 @@ export default function WhatsApp() {
     try { return localStorage.getItem('contextai_analysis_depth') || 'moderate' } catch (e) { return 'moderate' }
   })
   const [copyFeedback, setCopyFeedback] = useState({})
+  const [chatsLoading, setChatsLoading] = useState(false)
+  const chatLoadInFlight = useRef(false)
+  const chatCountRef = useRef(chats.length)
+  // Route-stable analysis state. Reading from useJobs() means a navigation
+  // away to Dashboard/Discord no longer wipes the spinner or the
+  // progress message while the backend request is still running.
+  const { jobs, startJob, updateMessage, completeJob, clearAll } = useJobs()
+  const analysisJobId = (chatId) => `wa-analyze:${chatId}`
+  const chatLoadJobId = 'wa-load-chats'
+  // Re-derive chat-load message from the jobs store on every render. Falls
+  // back to an empty string once the job is cleared.
+  const chatLoadMessage = jobs[chatLoadJobId]?.message || ''
+
+  useEffect(() => {
+    chatCountRef.current = chats.length
+  }, [chats.length])
 
   useEffect(() => {
     checkStatus()
@@ -116,16 +132,34 @@ export default function WhatsApp() {
   async function checkStatus() {
     try {
       const res = await axios.get('http://localhost:8002/api/status')
-      setStatus(res.data || { connected: false })
-      
-      // Immediately load chats when connected (even if we have cached ones, refresh them)
-      if (res.data && res.data.connected) {
+      setStatus({ ...res.data, backendOffline: false } || { connected: false })
+
+      // Once connected (or no QR pending), drop any stale QR image.
+      if (res.data?.connected || !res.data?.hasQR) {
+        setQrCode(null)
+      }
+
+      if (res.data?.chatLoading) {
+        setChatsLoading(true)
+        startJob(chatLoadJobId, 'WhatsApp is syncing chats...')
+      } else if (!chatLoadInFlight.current) {
+        setChatsLoading(false)
+        completeJob(chatLoadJobId)
+      }
+
+      if (res.data?.chatError) {
+        updateMessage(chatLoadJobId, res.data.chatError)
+      }
+
+      // Load chats once after connection, then let the refresh button handle manual reloads.
+      if (res.data && res.data.connected && chatCountRef.current === 0 && !chatLoadInFlight.current) {
         loadChats()
       } else if (res.data && res.data.hasQR) {
         loadQR()
       }
     } catch (err) {
-      setStatus({ connected: false })
+      // Backend not reachable - flag it so the UI can tell the user to start it.
+      setStatus({ connected: false, backendOffline: true })
     }
   }
 
@@ -138,49 +172,75 @@ export default function WhatsApp() {
     }
   }
 
-  async function loadChats() {
+  async function loadChats(forceRefresh = false) {
+    if (chatLoadInFlight.current) return
+    chatLoadInFlight.current = true
+    setChatsLoading(true)
+    startJob(chatLoadJobId, forceRefresh ? 'Refreshing WhatsApp chats...' : 'Loading WhatsApp chats...')
+
     try {
-      const res = await axios.get('http://localhost:8002/api/chats', {
-        timeout: 65000 // 65 second timeout (server can use up to 60s for reconnecting)
-      })
+      const res = forceRefresh
+        ? await axios.post('http://localhost:8002/api/chats/refresh', {}, { timeout: 15000 })
+        : await axios.get('http://localhost:8002/api/chats', { timeout: 15000 })
+
       if (res.data && Array.isArray(res.data.chats)) {
         // Sort by timestamp descending (most recent first)
         const sortedChats = res.data.chats.sort((a, b) => b.timestamp - a.timestamp)
         setChats(sortedChats)
         localStorage.setItem('contextai_chats', JSON.stringify(sortedChats))
       }
+
+      if (res.data?.loading) {
+        updateMessage(chatLoadJobId, res.data.message || 'WhatsApp is syncing chats...')
+        setTimeout(() => {
+          chatLoadInFlight.current = false
+          loadChats(false)
+        }, 4000)
+        return
+      }
+
+      completeJob(chatLoadJobId)
     } catch (err) {
       console.warn('Failed to load chats', err)
-      
-      // Check if it's a reconnecting state
-      if (err.response && err.response.data && err.response.data.reconnecting) {
-        console.log('WhatsApp is syncing after reconnection, will retry...')
-        // Retry after 3 seconds
+
+      if (err.response?.status === 202 || err.response?.data?.reconnecting || err.response?.data?.loading) {
+        updateMessage(chatLoadJobId, err.response?.data?.message || 'WhatsApp is syncing after login...')
         setTimeout(() => {
+          chatLoadInFlight.current = false
           loadChats()
-        }, 3000)
+        }, 4000)
+        return
       }
-      // Keep showing cached chats even if refresh fails
+
+      updateMessage(chatLoadJobId, err.response?.data?.message || err.message || 'Failed to load chats')
+    } finally {
+      chatLoadInFlight.current = false
+      setChatsLoading(false)
     }
   }
 
   async function logout() {
-    if (!confirm('Logout from WhatsApp?')) return
+    if (!confirm("Logout from WhatsApp? You'll need to scan a new QR code to log back in.")) return
+    // Immediately reflect "logging out" so the UI never looks frozen.
+    setStatus({ connected: false, loggingOut: true })
+    setChats([])
+    setSelected(null)
+    setSummaries({})
+    setQaHistory({})
+    setViewedSummaries({})
+    setQrCode(null)
+    localStorage.removeItem('contextai_chats')
+    localStorage.removeItem('contextai_summaries')
+    localStorage.removeItem('contextai_qa_history')
+    localStorage.removeItem('contextai_viewed_summaries')
     try {
+      // Backend responds immediately and regenerates the QR in the background.
       await axios.post('http://localhost:8002/api/logout')
-      setChats([])
-      setSelected(null)
-      setSummaries({})
-      setQaHistory({})
-      setViewedSummaries({})
-      localStorage.removeItem('contextai_chats')
-      localStorage.removeItem('contextai_summaries')
-      localStorage.removeItem('contextai_qa_history')
-      localStorage.removeItem('contextai_viewed_summaries')
-      setTimeout(checkStatus, 3000)
     } catch (err) {
-      alert('Logout failed: ' + (err.message || 'unknown'))
+      console.warn('Logout request failed (continuing):', err.message)
     }
+    // Poll frequently for a few seconds to surface the fresh QR quickly.
+    for (let i = 1; i <= 12; i++) setTimeout(checkStatus, i * 1500)
   }
 
   function selectChat(c) {
@@ -196,61 +256,52 @@ export default function WhatsApp() {
   async function analyzeSelected() {
     if (!selected) return
     const chatId = selected.id
-    
-    if (loadingChats[chatId]) return
-    
-    setLoadingChats(prev => ({ ...prev, [chatId]: true }))
-    
-    // Start the analysis - don't await inside try to prevent cancellation
-    const analysisPromise = axios.post('http://localhost:8002/api/messages', { 
-      chatId, 
-      limit: messageLimit,
-      analysisDepth: analysisDepth // Send analysis depth to backend
-    })
-      .then(res => {
-        if (res.data) {
-          const s = {
-            ...res.data,
-            chatName: selected.name || res.data.chatName, // Ensure we use the name from chat list
-            isGroup: selected.isGroup
-          }
-          
-          // Save to localStorage immediately
-          const existingSummaries = JSON.parse(localStorage.getItem('contextai_summaries') || '{}')
-          const updated = { ...existingSummaries, [chatId]: s }
-          localStorage.setItem('contextai_summaries', JSON.stringify(updated))
-          
-          // Update state if component is still mounted
-          setSummaries(prev => ({ ...prev, [chatId]: s }))
-          
-          // Reset viewed status so green dot appears if user is viewing a different chat
-          if (selected.id !== chatId) {
-            setViewedSummaries(prev => {
-              const updated = { ...prev, [chatId]: false }
-              localStorage.setItem('contextai_viewed_summaries', JSON.stringify(updated))
-              return updated
-            })
-          }
-        }
+    const jobId = analysisJobId(chatId)
+
+    if (jobs[jobId]) return // already running, do not double-fire
+
+    // Register the job in the route-stable store. This is the single source of
+    // truth for "is analyzing" (isAnalyzing derives from it), so the spinner
+    // survives navigation and the summary is never silently lost.
+    startJob(jobId, `⏳ Analyzing ${selected.name || 'chat'}...`)
+
+    try {
+      const res = await axios.post('http://localhost:8002/api/messages', {
+        chatId,
+        limit: messageLimit,
+        analysisDepth: analysisDepth,
       })
-      .catch(err => {
-        console.error('Analyze failed', err)
-        // Only show alert if not a cancellation
-        if (err.code !== 'ERR_CANCELED') {
-          alert('Analyze failed: ' + (err.message || 'unknown'))
+      if (res.data) {
+        const s = {
+          ...res.data,
+          chatName: selected.name || res.data.chatName,
+          isGroup: selected.isGroup,
         }
-      })
-      .finally(() => {
-        // Update loading state
-        setLoadingChats(prev => {
-          const next = { ...prev }
-          delete next[chatId]
+        // Persist to localStorage immediately so the summary survives even if
+        // the component unmounted (user navigated away) while the request ran.
+        const existingSummaries = JSON.parse(localStorage.getItem('contextai_summaries') || '{}')
+        const updated = { ...existingSummaries, [chatId]: s }
+        localStorage.setItem('contextai_summaries', JSON.stringify(updated))
+        setSummaries(prev => ({ ...prev, [chatId]: s }))
+        // Mark unseen so the sidebar shows the "new summary" dot until viewed.
+        setViewedSummaries(prev => {
+          const next = { ...prev, [chatId]: false }
+          localStorage.setItem('contextai_viewed_summaries', JSON.stringify(next))
           return next
         })
-      })
-    
-    // Don't block - let it run in background
-    return analysisPromise
+        updateMessage(jobId, `✅ Summary ready for ${s.chatName}`)
+      }
+    } catch (err) {
+      console.error('Analyze failed', err)
+      if (err.code !== 'ERR_CANCELED') {
+        const msg = err.response?.data?.message || err.response?.data?.error || err.message || 'Analyze failed'
+        updateMessage(jobId, `⚠️ ${msg}`)
+      }
+    } finally {
+      // Delay clearing the job entry slightly so the user can see the
+      // success/error message instead of it vanishing mid-render.
+      setTimeout(() => completeJob(jobId), 1800)
+    }
   }
 
   async function askQuestion() {
@@ -299,9 +350,18 @@ export default function WhatsApp() {
     }
   }
 
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  }
+
   function formatAISummary(text) {
     if (!text) return null
-    return text
+    return escapeHtml(text)
       .replace(/\*\*(.*?)\*\*/g, '<strong class="text-gold">$1</strong>')
       .replace(/(📋|✅|📌|💭|⭐|📊|👥|⚡|🔍)\s*([^\n]+)/g, '<div class="emoji-header">$1 $2</div>')
       .replace(/\*\s+([^*\n]+)/g, '<div class="bullet">• $1</div>')
@@ -416,13 +476,27 @@ export default function WhatsApp() {
 
   const currentSummary = selected ? summaries[selected.id] : null
   const currentQA = selected ? (qaHistory[selected.id] || []) : []
+  // Derive "is this chat analyzing" reactively from the route-stable job
+  // store, so the spinner survives navigation AND auto-clears the moment the
+  // job completes (even if completion happened while this page was unmounted).
+  const isAnalyzing = selected ? Boolean(jobs[analysisJobId(selected.id)]) : false
 
   return (
     <div className="page whatsapp">
       <div className="status-bar">
         <div className="status-left">
           <div className={`status-dot ${status.connected ? 'online' : 'offline'}`}></div>
-          <span>{status.connected ? `✅ Connected (${status.chatCount || 0} chats)` : '⏳ Not connected'}</span>
+          <span>
+            {status.backendOffline
+              ? '🔌 Backend offline — run: node whatsapp_api.js'
+              : status.loggingOut
+              ? '👋 Logging out — a new QR code will appear shortly...'
+              : status.connected
+              ? `✅ Connected (${status.chatCount || 0} chats)`
+              : status.hasQR
+              ? '📱 Scan the QR code to connect'
+              : '⏳ Connecting to WhatsApp...'}
+          </span>
         </div>
         <div className="status-right">
           {status.connected && (
@@ -551,8 +625,19 @@ export default function WhatsApp() {
           <aside className="left">
             <div className="sidebar-header">
               <h3>💬 Chats</h3>
-              <button className="icon-btn" onClick={loadChats} title="Refresh">🔄</button>
+              <button className="icon-btn" onClick={() => loadChats(true)} title="Refresh" disabled={chatsLoading}>🔄</button>
             </div>
+
+            {chatsLoading && (
+              <div className="sync-message">
+                <div className="spinner-small"></div>
+                <span>{chatLoadMessage || 'Loading WhatsApp chats...'}</span>
+              </div>
+            )}
+
+            {!chatsLoading && chatLoadMessage && (
+              <div className="sync-message warning">{chatLoadMessage}</div>
+            )}
 
             <input
               type="text"
@@ -618,20 +703,20 @@ export default function WhatsApp() {
                   <button
                     className="analyze-btn"
                     onClick={analyzeSelected}
-                    disabled={loadingChats[selected.id]}
+                    disabled={isAnalyzing}
                   >
-                    {loadingChats[selected.id] ? '⏳ Analyzing...' : '⚡ Analyze Chat'}
+                    {isAnalyzing ? '⏳ Analyzing...' : currentSummary ? '🔄 Re-analyze' : '⚡ Analyze Chat'}
                   </button>
                 </div>
 
-                {loadingChats[selected.id] && (
+                {isAnalyzing && !currentSummary && (
                   <div className="loading-indicator">
                     <div className="spinner"></div>
-                    <p>Analyzing chat...</p>
+                    <p>Analyzing chat... you can switch pages, this keeps running.</p>
                   </div>
                 )}
 
-                {currentSummary && !loadingChats[selected.id] && (
+                {currentSummary && (
                   <div className="summary-section">
                     {currentSummary.aiSummary && (
                       <div className="ai-summary-box">
@@ -646,6 +731,22 @@ export default function WhatsApp() {
                           </button>
                         </div>
                         <div dangerouslySetInnerHTML={{ __html: formatAISummary(currentSummary.aiSummary) }} />
+                      </div>
+                    )}
+
+                    {!currentSummary.aiSummary && (
+                      <div className="ai-summary-box ai-summary-failed">
+                        <div className="summary-header">
+                          <h4>⚠️ AI summary unavailable</h4>
+                        </div>
+                        <p className="muted">
+                          The stats below were collected, but the AI engine didn't return a summary
+                          (it may be busy or offline). Your messages are safe — click
+                          <strong> Analyze Chat</strong> again to retry.
+                        </p>
+                        <button className="analyze-btn" onClick={analyzeSelected} disabled={isAnalyzing}>
+                          🔁 Retry summary
+                        </button>
                       </div>
                     )}
 
@@ -754,7 +855,14 @@ export default function WhatsApp() {
                               ) : (
                                 <>
                                   <div className="qa-meta">🤖 {qa.contextMessages || '?'} msgs:</div>
-                                  <div dangerouslySetInnerHTML={{ __html: qa.answer?.replace(/\n/g, '<br>') }} />
+                                  <div>
+                                    {(qa.answer || '').split('\n').map((line, index) => (
+                                      <React.Fragment key={index}>
+                                        {line}
+                                        {index < (qa.answer || '').split('\n').length - 1 && <br />}
+                                      </React.Fragment>
+                                    ))}
+                                  </div>
                                 </>
                               )}
                             </div>
@@ -765,7 +873,7 @@ export default function WhatsApp() {
                   </div>
                 )}
 
-                {!currentSummary && !loadingChats[selected.id] && (
+                {!currentSummary && !isAnalyzing && (
                   <div className="empty-state">
                     <div className="empty-icon">📱</div>
                     <p>No summary yet</p>

@@ -9,7 +9,7 @@ const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
 const { Client, GatewayIntentBits } = require("discord.js");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { createModel, getStatus, HOSTS, TEXT_MODEL } = require("./llm");
 
 require("dotenv").config();
 
@@ -42,48 +42,37 @@ if (!fs.existsSync(SUMMARIES_DIR)) {
   fs.mkdirSync(SUMMARIES_DIR, { recursive: true });
 }
 
-// Initialize Gemini AI with multi-key support
-const geminiAPIKeys = [];
-const geminiModels = [];
+// Initialize the AI engine: Ollama (minimax-m3:cloud), one handle per
+// host for round-robin load balancing with cross-host failover.
+const geminiModels = HOSTS.map((host) => createModel({ host }));
 let currentModelIndex = 0;
 
-if (process.env.GEMINI_API_KEY) geminiAPIKeys.push(process.env.GEMINI_API_KEY);
-if (process.env.GEMINI_API_KEY_2)
-  geminiAPIKeys.push(process.env.GEMINI_API_KEY_2);
-if (process.env.GEMINI_API_KEY_3)
-  geminiAPIKeys.push(process.env.GEMINI_API_KEY_3);
-
-if (geminiAPIKeys.length === 0) {
-  console.warn("⚠️ No GEMINI_API_KEY found - AI analysis disabled");
+if (geminiModels.length === 0) {
+  console.warn("⚠️ No OLLAMA_HOSTS configured - AI analysis disabled");
 } else {
-  geminiAPIKeys.forEach((key, index) => {
-    try {
-      const genAI = new GoogleGenerativeAI(key);
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash-lite",
-      });
-      geminiModels.push(model);
-      console.log(`🤖 Gemini AI #${index + 1} initialized`);
-    } catch (err) {
-      console.error(
-        `❌ Failed to initialize API key #${index + 1}:`,
-        err.message
-      );
-    }
+  HOSTS.forEach((host, index) => {
+    console.log(`🤖 Ollama AI #${index + 1} -> ${host} (${TEXT_MODEL})`);
   });
-  console.log(
-    `✅ Total active API keys: ${geminiModels.length}/${geminiAPIKeys.length}`
-  );
+  console.log(`✅ Total active Ollama hosts: ${geminiModels.length}`);
 }
 
 function getGeminiModel() {
   if (geminiModels.length === 0) return null;
   currentModelIndex = (currentModelIndex + 1) % geminiModels.length;
   console.log(
-    `   🔄 Using Gemini API #${currentModelIndex + 1} of ${geminiModels.length}`
+    `   🔄 Using Ollama host #${currentModelIndex + 1} of ${geminiModels.length}`
   );
   return geminiModels[currentModelIndex];
 }
+
+// AI engine status endpoint (Ollama hosts + models)
+app.get("/api/ai/status", async (req, res) => {
+  try {
+    res.json(await getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Retry helper for API calls with exponential backoff
 async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 2000) {
@@ -99,7 +88,13 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 2000) {
         error.message.includes("500") ||
         error.message.includes("overloaded") ||
         error.message.includes("429") ||
-        error.message.includes("RESOURCE_EXHAUSTED");
+        error.message.includes("RESOURCE_EXHAUSTED") ||
+        error.message.includes("fetch failed") ||
+        error.message.includes("ECONNREFUSED") ||
+        error.message.includes("ECONNRESET") ||
+        error.message.includes("ETIMEDOUT") ||
+        error.message.includes("socket hang up") ||
+        error.message.includes("aborted");
 
       if (attempt === maxRetries || !isRetryable) {
         throw lastError;
@@ -119,114 +114,146 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 2000) {
 }
 
 // Initialize Discord Bot
-const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
-
-if (!DISCORD_TOKEN) {
-  console.error("❌ DISCORD_BOT_TOKEN not found in .env file");
-  console.log(
-    "⚠️  Please add DISCORD_BOT_TOKEN=your_token_here to backend/.env"
-  );
-  process.exit(1);
-}
-
-const discordClient = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-});
-
+// The bot token can come from the environment OR be supplied at runtime via
+// POST /api/connect (so a user can paste their token straight into the UI).
+let discordClient = null;
 let isDiscordReady = false;
+let isConnecting = false;
+let connectError = null;
 let guildsCache = [];
 let channelsCache = {};
 
-discordClient.once("ready", () => {
-  console.log(`✅ Discord Bot logged in as ${discordClient.user.tag}`);
-  isDiscordReady = true;
+function attachHandlers(client) {
+  client.once("ready", () => {
+    console.log(`✅ Discord Bot logged in as ${client.user.tag}`);
+    isDiscordReady = true;
+    isConnecting = false;
+    connectError = null;
 
-  // Cache guilds and channels
-  guildsCache = Array.from(discordClient.guilds.cache.values()).map(
-    (guild) => ({
+    // Cache guilds and channels
+    guildsCache = Array.from(client.guilds.cache.values()).map((guild) => ({
       id: guild.id,
       name: guild.name,
       icon: guild.iconURL(),
       memberCount: guild.memberCount,
-    })
-  );
+    }));
 
-  guildsCache.forEach((guild) => {
-    const guildObj = discordClient.guilds.cache.get(guild.id);
-    channelsCache[guild.id] = Array.from(guildObj.channels.cache.values())
-      .filter((ch) => ch.type === 0) // Only GuildText channels (ChannelType.GuildText = 0)
-      .map((ch) => ({
-        id: ch.id,
-        name: ch.name,
-        type: ch.type,
-      }));
+    guildsCache.forEach((guild) => {
+      const guildObj = client.guilds.cache.get(guild.id);
+      channelsCache[guild.id] = Array.from(guildObj.channels.cache.values())
+        .filter((ch) => ch.type === 0) // Only GuildText channels
+        .map((ch) => ({ id: ch.id, name: ch.name, type: ch.type }));
+    });
+
+    console.log(`📡 Connected to ${guildsCache.length} servers`);
   });
 
-  console.log(`📡 Connected to ${guildsCache.length} servers`);
-});
+  // Auto-ingest Discord messages to RAG
+  client.on("messageCreate", async (message) => {
+    try {
+      if (message.author.bot) return;
+      if (message.channel.type !== 0) return;
 
-// Auto-ingest Discord messages to RAG
-discordClient.on("messageCreate", async (message) => {
-  try {
-    // Ignore bot messages
-    if (message.author.bot) return;
+      const channelKey = `${message.guildId}_${message.channelId}`;
+      const mapping = discordMapping[channelKey];
 
-    // Only process text channels
-    if (message.channel.type !== 0) return;
-
-    const channelKey = `${message.guildId}_${message.channelId}`;
-    const mapping = discordMapping[channelKey];
-
-    if (mapping && message.content) {
-      console.log(
-        `[DISCORD-INGEST] Channel ${channelKey} IS mapped. Sending to RAG server...`
-      );
-
-      const payload = {
-        project_id: mapping.project_id,
-        team_id: mapping.team_id,
-        source: "discord",
-        text: message.content,
-      };
-
-      axios
-        .post(INGEST_SERVER_URL, payload)
-        .then(() => {
-          console.log(
-            `[DISCORD-INGEST] SUCCESS: Sent message from ${message.channel.name} to RAG server.`
+      if (mapping && message.content) {
+        console.log(
+          `[DISCORD-INGEST] Channel ${channelKey} IS mapped. Sending to RAG server...`
+        );
+        const payload = {
+          project_id: mapping.project_id,
+          team_id: mapping.team_id,
+          source: "discord",
+          text: message.content,
+        };
+        axios
+          .post(INGEST_SERVER_URL, payload)
+          .then(() =>
+            console.log(
+              `[DISCORD-INGEST] SUCCESS: Sent message from ${message.channel.name} to RAG server.`
+            )
+          )
+          .catch((err) =>
+            console.error(
+              "[DISCORD-INGEST] FAILED to send to RAG server:",
+              err.message
+            )
           );
-        })
-        .catch((err) => {
-          console.error(
-            "[DISCORD-INGEST] FAILED to send to RAG server:",
-            err.message
-          );
-        });
-    } else if (message.content) {
-      console.log(
-        `[DISCORD-INGEST] Channel ${channelKey} is NOT in discord_mapping.json. Ignoring.`
+      }
+    } catch (err) {
+      console.error(
+        "[DISCORD-INGEST] Error processing message for ingestion:",
+        err
       );
     }
-  } catch (err) {
-    console.error(
-      "[DISCORD-INGEST] Error processing message for ingestion:",
-      err
-    );
+  });
+
+  client.on("error", (error) => {
+    console.error("❌ Discord client error:", error);
+  });
+}
+
+/**
+ * Connect (or reconnect) to Discord with the given token.
+ * Creates a fresh client each time so a bad-token attempt can be retried
+ * with a corrected token without restarting the process.
+ */
+async function connectDiscord(token) {
+  if (!token || typeof token !== "string" || !token.trim()) {
+    throw new Error("A Discord bot token is required");
   }
-});
+  if (isConnecting) {
+    throw new Error("Already attempting to connect - please wait");
+  }
 
-discordClient.on("error", (error) => {
-  console.error("❌ Discord client error:", error);
-});
+  // Tear down any previous client.
+  if (discordClient) {
+    try {
+      await discordClient.destroy();
+    } catch (_) {
+      /* ignore */
+    }
+  }
 
-// Login to Discord
-discordClient.login(DISCORD_TOKEN).catch((err) => {
-  console.error("❌ Failed to login to Discord:", err.message);
-});
+  isConnecting = true;
+  isDiscordReady = false;
+  connectError = null;
+  guildsCache = [];
+  channelsCache = {};
+
+  discordClient = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+    ],
+  });
+  attachHandlers(discordClient);
+
+  try {
+    await discordClient.login(token.trim());
+    // `login` resolves once the token is accepted; the "ready" event flips
+    // isDiscordReady shortly after as the guild cache populates.
+  } catch (err) {
+    isConnecting = false;
+    connectError = err.message || "Login failed";
+    console.error("❌ Failed to login to Discord:", connectError);
+    throw err;
+  }
+}
+
+const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
+if (DISCORD_TOKEN) {
+  connectDiscord(DISCORD_TOKEN).catch(() => {
+    /* error already logged + stored in connectError */
+  });
+} else {
+  console.warn(
+    "⚠️  DISCORD_BOT_TOKEN not set - the Discord page will prompt for a bot token. " +
+      "You can also add DISCORD_BOT_TOKEN to backend/.env."
+  );
+}
 
 // API Endpoints
 
@@ -234,16 +261,35 @@ discordClient.login(DISCORD_TOKEN).catch((err) => {
 app.get("/api/status", (req, res) => {
   res.json({
     ready: isDiscordReady,
-    user: isDiscordReady
-      ? {
-          id: discordClient.user.id,
-          username: discordClient.user.username,
-          tag: discordClient.user.tag,
-          avatar: discordClient.user.displayAvatarURL(),
-        }
-      : null,
+    connecting: isConnecting,
+    // "configured" tells the UI whether a token has ever been supplied.
+    configured: Boolean(discordClient),
+    error: connectError,
+    user:
+      isDiscordReady && discordClient?.user
+        ? {
+            id: discordClient.user.id,
+            username: discordClient.user.username,
+            tag: discordClient.user.tag,
+            avatar: discordClient.user.displayAvatarURL(),
+          }
+        : null,
     guilds: guildsCache.length,
   });
+});
+
+// Connect to Discord at runtime with a user-supplied bot token.
+app.post("/api/connect", async (req, res) => {
+  const { token } = req.body || {};
+  try {
+    await connectDiscord(token);
+    res.json({
+      success: true,
+      message: "Token accepted - connecting to Discord...",
+    });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
 });
 
 // Get all servers (guilds)
@@ -393,7 +439,7 @@ Provide a summary with:
 Keep it concise and well-structured.`;
     }
 
-    console.log(`🤖 Analyzing with Gemini AI (${analysisDepth} mode)...`);
+    console.log(`🤖 Analyzing with Ollama AI (${analysisDepth} mode)...`);
 
     const result = await retryWithBackoff(
       async () => await model.generateContent(prompt),
@@ -504,11 +550,11 @@ app.post("/api/qa", async (req, res) => {
         });
       } catch (err) {
         console.error("❌ DISCORD-RAG Error:", err.message);
-        // Fall back to Gemini if RAG fails
+        // Fall back to Ollama if RAG fails
       }
     }
 
-    // Fallback: Use Gemini with summary (for unmapped channels or if RAG fails)
+    // Fallback: Use Ollama with summary (for unmapped channels or if RAG fails)
     if (!summaryId) {
       return res
         .status(400)
@@ -527,7 +573,7 @@ app.post("/api/qa", async (req, res) => {
       return res.status(503).json({ error: "AI not configured" });
     }
 
-    console.log("[DISCORD-RAG] Using Gemini fallback with summary...");
+    console.log("[DISCORD-RAG] Using Ollama fallback with summary...");
     const prompt = `Discord Channel: #${summaryData.channelName} in ${summaryData.guildName}
 
 Summary:

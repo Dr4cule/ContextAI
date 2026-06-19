@@ -1,119 +1,67 @@
-# API Keys Management Guide
+# AI Engine Guide (Ollama)
+
+> **Note:** ContextAI no longer uses Google Gemini API keys. All AI runs on
+> **Ollama**. This guide replaces the old multi-key setup.
 
 ## Overview
-ContextAI now supports **unlimited Gemini API keys** with intelligent load balancing for maximum reliability.
 
-## Current Configuration
-- **Total Keys**: 3 active API keys
-- **Load Balancing**: Round-robin distribution
-- **Failover**: Automatic cycling through all keys on overload
+Every backend (WhatsApp, Discord) and the RAG server share one AI client:
+[`llm.js`](./llm.js). It talks to one or more Ollama servers and load-balances
+across them with automatic failover.
 
-## How It Works
+- **Text / reasoning:** `minimax-m3:cloud`
+- **Vision (images):** `minimax-m3:cloud` (handles images natively; override with `OLLAMA_VISION_MODEL` if you prefer a dedicated vision model)
+- **Embeddings (RAG only):** `nomic-embed-text:latest` when installed, otherwise a local hash-based fallback
 
-### 1. Round-Robin Load Balancing
-- Each request uses the next available API key in rotation
-- Distributes load evenly across all keys
-- Prevents any single key from being overloaded
+## Configuration
 
-### 2. Intelligent Failover
-When an API key returns "overloaded" error:
-1. Immediately tries the next available key (no waiting)
-2. Cycles through ALL remaining keys
-3. Only waits and retries if all keys are exhausted
-4. Achieves near 100% success rate with 3+ keys
+Set hosts via the `OLLAMA_HOSTS` environment variable (comma-separated). Defaults
+to `http://localhost:11434` if unset — so it works with no `.env`.
 
-## Adding API Keys
-
-### Method 1: Environment Variables (.env file)
 ```env
-GEMINI_API_KEY=your_first_key_here
-GEMINI_API_KEY_2=your_second_key_here
-GEMINI_API_KEY_3=your_third_key_here
-GEMINI_API_KEY_4=your_fourth_key_here
-GEMINI_API_KEY_5=your_fifth_key_here
-# Add more as needed...
+OLLAMA_HOSTS=http://localhost:11434
+# Optional overrides:
+OLLAMA_TEXT_MODEL=minimax-m3:cloud
+# OLLAMA_VISION_MODEL=minimax-m3:cloud
+# OLLAMA_EMBED_MODEL=nomic-embed-text:latest
+OLLAMA_TIMEOUT_MS=180000
 ```
 
-### Method 2: Runtime API (Dynamic)
-```bash
-# Add a new key while server is running
-curl -X POST http://localhost:8002/api/keys/add \
-  -H "Content-Type: application/json" \
-  -d '{"apiKey": "AIzaSy..."}'
-```
+## How load balancing works
 
-### Method 3: Check Key Status
+1. **Round-robin** — each request uses the next host in rotation.
+2. **Failover** — if a host is down or overloaded, the call retries on the
+   remaining hosts before surfacing an error.
+3. **Vision routing** — image requests are sent only to hosts that have a
+   vision-capable model, discovered from each host's `/api/tags`.
+
+Add redundancy simply by adding more hosts to `OLLAMA_HOSTS`.
+
+## Check status
+
 ```bash
-# See all active keys
 curl http://localhost:8002/api/keys/status
 ```
 
-Response:
 ```json
 {
-  "totalKeys": 3,
-  "activeModels": 3,
-  "currentIndex": 1,
-  "keys": [
-    {
-      "id": 1,
-      "keyPreview": "AIzaSyChPfiaMk4k33nm...7nM",
-      "active": true
-    },
-    {
-      "id": 2,
-      "keyPreview": "AIzaSyCg3V-CkW3PLwJl...ikE",
-      "active": true
-    },
-    {
-      "id": 3,
-      "keyPreview": "AIzaSyB4iGnWZcN0-Tgf...w7U",
-      "active": true
-    }
+  "engine": "ollama",
+  "textModel": "minimax-m3:cloud",
+  "visionModel": "minimax-m3:cloud",
+  "embedModel": "nomic-embed-text:latest",
+  "hosts": [
+    { "host": "http://localhost:11434", "reachable": true, "models": ["minimax-m3:cloud", "..."] }
   ]
 }
 ```
 
-## Success Rate Improvement
-
-| API Keys | Success Rate | Retry Speed |
-|----------|--------------|-------------|
-| 1 key    | ~60-70%      | 2-8 seconds |
-| 2 keys   | ~85-90%      | 0-4 seconds |
-| 3 keys   | ~95-99%      | 0-2 seconds |
-| 5+ keys  | ~99.9%       | Instant     |
-
-## Best Practices
-
-1. **Use at least 3 keys** for production
-2. **Add more keys** if you see frequent "all keys tried" messages
-3. **Monitor logs** for overload patterns
-4. **Distribute across different Google accounts** if possible
-
-## Getting More Keys
-
-1. Go to https://aistudio.google.com/app/apikey
-2. Create a new API key (free tier: 15 requests/min)
-3. Add to `.env` file or use POST endpoint
-4. Restart server (if using .env) or use runtime API
+(The Discord backend exposes the same data at `/api/ai/status`.)
 
 ## Troubleshooting
 
-### Still seeing overload errors?
-- **Add more keys**: Even free tier keys help distribute load
-- **Check logs**: Look for "All X API keys tried" - this means you need more keys
-- **Verify keys**: Use `/api/keys/status` to check all keys are active
-
-### Key not working?
-- Verify the key is correct in `.env`
-- Check Google Cloud Console for key restrictions
-- Ensure "Generative Language API" is enabled
-
-## Current Status
-✅ 3 active API keys configured
-✅ Multi-key load balancing enabled
-✅ Intelligent failover active
-✅ Runtime key management available
-
-## Support
-For issues or questions, check the logs for detailed error messages showing which keys were tried and why they failed.
+- **`reachable: false`** — the host is down or unreachable from this machine.
+  Verify with `curl http://<host>:11434/api/tags`.
+- **Vision returns nothing** — ensure your text model supports images
+  (`minimax-m3:cloud` does), or set `OLLAMA_VISION_MODEL` to a vision model.
+- **Slow responses** — cloud models can take a few seconds; raise
+  `OLLAMA_TIMEOUT_MS` if you see timeouts on very large prompts.

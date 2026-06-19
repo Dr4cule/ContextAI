@@ -3,17 +3,23 @@
 .env.local
 .env.*.local
 backend/.env
+server/.env
 
 # Dependencies (re-installed with 'npm install')
 node_modules/
 backend/node_modules/
+server/node_modules/
 package-lock.json
+backend/package-lock.json
+server/package-lock.json
+backend/whatsapp_ui/package-lock.json
 
 # WhatsApp session data (contains your login session)
 .wwebjs_auth/
 .wwebjs_cache/
 backend/.wwebjs_auth/
 backend/.wwebjs_cache/
+backend/.wwebjs_auth.old-*/
 
 # Python
 __pycache__/
@@ -38,6 +44,12 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+
+# Cached/generated state files generated at runtime
+.run-logs/
+backend/summaries.json
+server/rag_store.json
+backend/contextai_discord_summaries/
 
 # OS-specific files
 .DS_Store

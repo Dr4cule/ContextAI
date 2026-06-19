@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { useJobs } from '../state/jobsStore';
 
 export default function Discord() {
   const [botStatus, setBotStatus] = useState(null);
@@ -8,7 +9,6 @@ export default function Discord() {
   const [channels, setChannels] = useState([]);
   const [selectedChannel, setSelectedChannel] = useState(null);
   const [summaries, setSummaries] = useState([]);
-  const [analyzing, setAnalyzing] = useState(false);
   const [currentSummary, setCurrentSummary] = useState(null);
   const [question, setQuestion] = useState('');
   const [qaHistory, setQaHistory] = useState([]);
@@ -17,6 +17,22 @@ export default function Discord() {
   // Analysis settings
   const [analysisDepth, setAnalysisDepth] = useState('moderate');
   const [messageLimit, setMessageLimit] = useState(100);
+
+  // Bot token entry (when the backend has no token configured)
+  const [tokenInput, setTokenInput] = useState('');
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState(null);
+
+  const { jobs, startJob, updateMessage, completeJob } = useJobs();
+  const analysisJobId = (g, c) => `dc-analyze:${g}:${c}`;
+  // Derive the page-local `analyzing` flag from the route-stable job store
+  // so navigation does not wipe the spinner. We treat any dc-analyze:* job
+  // matching the currently selected guild/channel as "running".
+  const jobId = selectedGuild && selectedChannel
+    ? analysisJobId(selectedGuild.id, selectedChannel.id)
+    : null;
+  const analyzing = jobId ? Boolean(jobs[jobId]) : false;
+  const analyzingMessage = jobId && jobs[jobId] ? jobs[jobId].message : '';
 
   useEffect(() => {
     loadBotStatus();
@@ -66,8 +82,33 @@ export default function Discord() {
     try {
       const res = await axios.get('http://localhost:8004/api/status');
       setBotStatus(res.data);
+      // Surface a backend login error (e.g. bad token) in the setup form.
+      if (res.data?.error && !res.data?.ready) setConnectError(res.data.error);
     } catch (err) {
-      console.error('Error loading bot status:', err);
+      // Backend unreachable - represent as an explicit "offline" status so the
+      // UI shows a helpful message instead of an infinite spinner.
+      setBotStatus({ ready: false, configured: false, offline: true });
+    }
+  };
+
+  const submitToken = async () => {
+    if (!tokenInput.trim()) return;
+    setConnecting(true);
+    setConnectError(null);
+    try {
+      const res = await axios.post('http://localhost:8004/api/connect', { token: tokenInput.trim() });
+      if (res.data?.success) {
+        setTokenInput('');
+        // Poll status a few times while the gateway connects.
+        for (let i = 0; i < 10; i++) {
+          await new Promise(r => setTimeout(r, 1500));
+          await loadBotStatus();
+        }
+      }
+    } catch (err) {
+      setConnectError(err.response?.data?.error || err.message || 'Connection failed');
+    } finally {
+      setConnecting(false);
     }
   };
 
@@ -102,8 +143,13 @@ export default function Discord() {
     if (!selectedGuild || !selectedChannel) {
       return;
     }
+    if (analyzing) return; // already running, don't double-fire
 
-    setAnalyzing(true);
+    const jobId = analysisJobId(selectedGuild.id, selectedChannel.id);
+    // Register the job before updating it - updateMessage no-ops if the job
+    // doesn't exist, which would otherwise lose the spinner on navigation.
+    startJob(jobId, `⏳ Analyzing #${selectedChannel.name}...`);
+
     try {
       const res = await axios.post('http://localhost:8004/api/analyze', {
         guildId: selectedGuild.id,
@@ -120,7 +166,7 @@ export default function Discord() {
           channelName: selectedChannel.name,
         };
         setCurrentSummary(newSummary);
-        
+
         // Save to localStorage for Dashboard visibility
         const dashboardSummary = {
           chatId: res.data.summaryId,
@@ -133,17 +179,20 @@ export default function Discord() {
           source: 'discord',
           timestamp: new Date().toISOString(),
         };
-        
+
         const existingSummaries = JSON.parse(localStorage.getItem('contextai_summaries') || '{}');
         existingSummaries[res.data.summaryId] = dashboardSummary;
         localStorage.setItem('contextai_summaries', JSON.stringify(existingSummaries));
-        
+
         loadSummaries();
+        updateMessage(jobId, `✅ Analysis complete for #${selectedChannel.name}`);
       }
     } catch (err) {
       console.error('Analysis error:', err);
+      updateMessage(jobId, `⚠️ ${err.response?.data?.error || err.message || 'Analysis failed'}`);
     } finally {
-      setAnalyzing(false);
+      // Keep the success/error message visible briefly, then clear the job.
+      setTimeout(() => completeJob(jobId), 2500);
     }
   };
 
@@ -179,9 +228,17 @@ export default function Discord() {
       <div className="status-bar discord-status">
         <div className="status-left">
           <div className={`status-dot ${botStatus?.ready ? 'online' : 'offline'}`}></div>
-          <span>{botStatus?.ready ? `✅ Discord Connected (${guilds.length} servers)` : '⏳ Connecting to Discord...'}</span>
+          <span>
+            {botStatus?.ready
+              ? `✅ Discord Connected (${guilds.length} servers)`
+              : botStatus?.connecting
+              ? '⏳ Connecting to Discord...'
+              : botStatus?.offline
+              ? '🔌 Discord backend offline (start discord_api.js)'
+              : '🔑 Bot token required'}
+          </span>
         </div>
-        {botStatus?.ready && (
+        {botStatus?.ready && botStatus.user && (
           <div className="status-right">
             <div className="bot-info-compact">
               <img src={botStatus.user.avatar} alt="Bot" className="bot-avatar-small" />
@@ -191,7 +248,7 @@ export default function Discord() {
         )}
       </div>
 
-      {!botStatus || !botStatus.ready ? (
+      {botStatus?.connecting ? (
         <div className="loading-state">
           <div className="loading-spinner-container">
             <div className="spinner-large"></div>
@@ -201,6 +258,40 @@ export default function Discord() {
           </div>
           <p className="loading-text">Connecting to Discord Bot</p>
           <p className="muted-small">Initializing Discord.js gateway...</p>
+        </div>
+      ) : !botStatus?.ready ? (
+        <div className="token-setup">
+          <div className="token-card">
+            <div className="token-icon">🔑</div>
+            <h3>Connect your Discord bot</h3>
+            <p className="muted">
+              ContextAI needs a Discord <strong>bot token</strong> to read your servers and channels.
+              Paste it below to connect.
+            </p>
+            <ol className="token-steps">
+              <li>Open the <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Discord Developer Portal</a> → your application → <strong>Bot</strong>.</li>
+              <li>Click <strong>Reset Token</strong> (or Copy) to get the bot token.</li>
+              <li>Under <strong>Privileged Gateway Intents</strong>, enable <strong>Message Content Intent</strong>.</li>
+              <li>Invite the bot to your server (OAuth2 → URL Generator → <code>bot</code> scope).</li>
+            </ol>
+            <div className="token-input-row">
+              <input
+                type="password"
+                placeholder="Paste bot token (e.g. MTEx...)"
+                value={tokenInput}
+                onChange={e => setTokenInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') submitToken(); }}
+                disabled={connecting}
+              />
+              <button onClick={submitToken} disabled={connecting || !tokenInput.trim()}>
+                {connecting ? '⏳ Connecting...' : '🔗 Connect'}
+              </button>
+            </div>
+            {connectError && <div className="token-error">⚠️ {connectError}</div>}
+            <p className="muted-small">
+              Tip: you can also set <code>DISCORD_BOT_TOKEN</code> in <code>backend/.env</code> to connect automatically on startup.
+            </p>
+          </div>
         </div>
       ) : (
         <div className="layout">
@@ -324,7 +415,7 @@ export default function Discord() {
                 {analyzing && (
                   <div className="loading-indicator">
                     <div className="spinner"></div>
-                    <p>Analyzing channel...</p>
+                    <p>{analyzingMessage || 'Analyzing channel...'}</p>
                   </div>
                 )}
 

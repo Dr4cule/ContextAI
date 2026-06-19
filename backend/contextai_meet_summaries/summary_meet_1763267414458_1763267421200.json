@@ -1,8 +1,0 @@
-{
-  "id": "summary_meet_1763267414458_1763267421200",
-  "transcriptId": "meet_1763267414458",
-  "transcriptName": "gear 5 meet",
-  "summary": "Here's a concise summary of the Google Meet transcript:\n\n**📊 Overview**\n*   **Meeting Purpose:** Final review of the updated dashboard before deployment.\n*   **Key Participants:** Alice, Bob, Charlie, Diana.\n\n**📋 Main Topics**\n*   **Dashboard Updates:** Discussion on visual improvements (summary cards, platform badges), responsiveness (grid for mobile), and performance optimizations.\n*   **User Experience Enhancements:** Addressing a spacing issue, optimizing transition animation speed, and adding a warning icon to the delete confirmation dialog.\n\n**✅ Action Items**\n*   **Decision:** Reduce transition animation duration from 300ms to 200ms.\n*   **Action:** Add a warning icon to the delete confirmation dialog.\n*   **Decision:** The dashboard is ready for demo and deployment.\n*   **Next Steps:** Bob will implement the warning icon. The dashboard will be shipped.\n\n**💡 Key Takeaways**\n*   The team has made significant visual and functional improvements to the dashboard.\n*   Performance and user experience concerns have been identified and addressed.\n*   The dashboard is deemed ready for its next stage.\n*   No immediate follow-ups are explicitly stated beyond the immediate action items.",
-  "analysisDepth": "moderate",
-  "analyzedAt": "2025-11-16T04:30:21.200Z"
-}

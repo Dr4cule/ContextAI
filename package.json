@@ -1,5 +1,20 @@
 {
-  "dependencies": {
-    "three": "^0.181.1"
-  }
+  "name": "contextai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ContextAI - WhatsApp & Discord chat intelligence powered by Ollama. See backend/ and server/ for the actual services and README.md for the full guide.",
+  "scripts": {
+    "dev:whatsapp": "cd backend && node whatsapp_api.js",
+    "dev:discord": "cd backend && node discord_api.js",
+    "dev:rag": "cd server && node index.js",
+    "dev:ui": "cd backend/whatsapp_ui && npm run dev",
+    "dev:all": "node ./scripts/dev-all.js",
+    "install:all": "npm install --prefix backend && npm install --prefix backend/whatsapp_ui && npm install --prefix server",
+    "build:ui": "cd backend/whatsapp_ui && npm run build"
+  },
+  "workspaces": [
+    "backend",
+    "backend/whatsapp_ui",
+    "server"
+  ]
 }
