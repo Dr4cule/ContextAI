@@ -62,3 +62,7 @@ desktop.ini
 *.swp
 *.swo
 *~
+
+# Agent / tooling scratch
+.agents/
+skills-lock.json

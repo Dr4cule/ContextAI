@@ -54,7 +54,7 @@ export default function About(){
           <div className="tech-item">
             <div className="tech-icon">🎨</div>
             <div className="tech-name">Custom CSS</div>
-            <div className="tech-desc">Glassmorphism & animations</div>
+            <div className="tech-desc">Glass-dark theme & motion</div>
           </div>
           <div className="tech-item">
             <div className="tech-icon">🔧</div>
@@ -137,9 +137,11 @@ export default function About(){
       <section className="about-section">
         <h3>🎨 Design Philosophy</h3>
         <p>
-          ContextAI pairs a retro-futuristic identity — the <strong>"Press Start 2P"</strong> pixel font on
-          the brand, navigation and headings — with a clean, highly readable <strong>Inter</strong> body type
-          and glassmorphism effects. The purple-gold gradient theme creates a modern yet nostalgic aesthetic.
+          ContextAI uses a modern <strong>glass-dark</strong> interface: a deep slate canvas with soft
+          ambient glows, frosted translucent surfaces, and an <strong>indigo–violet</strong> accent
+          (shifting to Discord blue on the Discord page). Typography is clean, highly readable
+          <strong> Inter</strong> with a <strong>JetBrains Mono</strong> accent for code and identifiers —
+          prioritising clarity and focus over decoration.
         </p>
       </section>
 

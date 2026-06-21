@@ -374,6 +374,12 @@ function recordBotResponse(groupId) {
   const now = Date.now();
   botResponseCooldowns[groupId] = now;
   console.log(`   ✅ Response recorded (5s cooldown started)`);
+
+  // Prune stale cooldown entries so this map can't grow without bound over a
+  // long-running session (a cooldown is only meaningful for BOT_COOLDOWN_MS).
+  for (const [id, ts] of Object.entries(botResponseCooldowns)) {
+    if (now - ts > BOT_COOLDOWN_MS * 10) delete botResponseCooldowns[id];
+  }
 }
 
 // Initialize WhatsApp client
@@ -1010,20 +1016,8 @@ async function cleanupAuthFolder() {
 }
 
 // API Endpoints
-
-// Get AI engine status (Ollama hosts + models)
-app.get("/api/keys/status", async (req, res) => {
-  try {
-    const status = await getStatus();
-    res.json({
-      ...status,
-      activeModels: geminiModels.length,
-      currentIndex: currentModelIndex,
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to read AI status: " + err.message });
-  }
-});
+// (AI engine status is served by /api/ai/status and the /api/keys/status
+//  alias defined near the top of this file.)
 
 // AI hosts are configured via the OLLAMA_HOSTS env var, not at runtime.
 app.post("/api/keys/add", (req, res) => {
@@ -1884,31 +1878,45 @@ app.post("/api/logout", async (req, res) => {
   // This is what makes logout feel instant instead of "forever".
   res.json({ success: true, message: "Logging out..." });
 
+  // Detach the old client immediately. Nulling the shared `client` ref first
+  // means any stray "message"/"disconnected" events from the dying session
+  // can't fire handlers against the soon-to-be-new client.
+  const oldClient = client;
+  client = null;
   isLoggingOut = true;
   isReady = false;
+  isReconnecting = false;
   allChats = [];
   currentQR = null;
+  conversationMemory = {}; // don't carry a prior account's bot memory forward
   console.log("👋 User requested logout...");
 
-  const oldClient = client;
+  // Tear down the old session. logout() unlinks the device on the phone but
+  // can hang, and destroy() must run before we touch the session folder
+  // (Windows keeps file locks while the browser is alive). Time-box the whole
+  // teardown so a stuck session can never block the fresh QR for more than a
+  // few seconds.
   try {
-    // logout() properly unlinks the device on the user's phone. Time-box it so
-    // a hung session can't stall the whole flow, then destroy the browser.
     await Promise.race([
-      oldClient.logout().catch(() => {}),
-      new Promise((resolve) => setTimeout(resolve, 8000)),
+      (async () => {
+        await oldClient.logout().catch(() => {});
+        await oldClient.destroy().catch(() => {});
+      })(),
+      new Promise((resolve) => setTimeout(resolve, 6000)),
     ]);
   } catch (err) {
-    console.log("⚠️ logout() warning:", err.message);
+    console.log("⚠️ logout teardown warning:", err.message);
   }
-
+  // Best-effort second destroy in case the race timed out mid-logout, so the
+  // browser process is really gone and the auth folder unlocks for cleanup.
   try {
     await oldClient.destroy();
-  } catch (err) {
-    console.log("⚠️ destroy() warning:", err.message);
+  } catch (_) {
+    /* already destroyed */
   }
 
-  // Clear session files (fast, background delete) for a fresh QR.
+  // Rename the session folder out of the way (near-instant) so the new client
+  // gets a clean slate and a fresh QR appears as fast as Chromium can boot.
   await cleanupAuthFolder();
 
   // A fresh logout->login is NOT a reconnect, so skip the long post-scan
