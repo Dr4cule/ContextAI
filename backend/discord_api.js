@@ -382,34 +382,30 @@ Messages analyzed: ${messageArray.length}
 Conversation:
 ${formattedMessages}
 
-Provide an IN-DEPTH analysis with:
+Write an IN-DEPTH analysis in clean markdown. Use the exact section headers below, each on its own line. Under each header use bullets starting with "- " (a dash), one per line. Never put two bullets on the same line. Attribute points to participants by their username where relevant.
+
 **📊 Deep Context Analysis**
-* Overall purpose and background
-* Community dynamics
+- Overall purpose and background
+- Community dynamics
 
 **📋 Detailed Topics & Themes**
-* Main topics with context
-* Technical discussions
-* Connections between topics
+- Main topics with context
+- Technical discussions and connections between topics
 
 **✅ Decisions & Reasoning**
-* Decisions made with reasoning
-* Impact and implications
+- Decisions made, with reasoning and impact
 
 **📌 Action Items & Dependencies**
-* Tasks with owners and deadlines
+- Task: owner (with deadline if mentioned)
 
 **👥 Active Participants**
-* Key contributors and roles
+- Key contributors and their roles
 
 **💡 Critical Insights**
-* Important moments with deeper meaning
+- Important moments with deeper meaning
 
 **🔍 Patterns & Predictions**
-* Recurring themes
-* Community health indicators
-
-Keep well-structured with clear bullet points.`;
+- Recurring themes and community health indicators`;
     } else {
       prompt = `Analyze this Discord channel conversation and provide a concise summary:
 
@@ -420,23 +416,22 @@ Messages analyzed: ${messageArray.length}
 Conversation:
 ${formattedMessages}
 
-Provide a summary with:
+Write a concise summary in clean markdown. Use the exact section headers below, each on its own line. Under each header use bullets starting with "- " (a dash), one per line. Never put two bullets on the same line. Attribute points to participants by their username where relevant.
+
 **📊 Overview**
-* Main purpose and context
+- Main purpose and context
 
 **📋 Key Topics**
-* Important topics discussed
+- Important topics discussed
 
 **✅ Decisions & Action Items**
-* Decisions made and next steps
+- Decisions made and next steps
 
 **👥 Active Participants**
-* Key contributors
+- Key contributors
 
 **💡 Highlights**
-* Notable quotes or moments
-
-Keep it concise and well-structured.`;
+- Notable quotes or moments`;
     }
 
     console.log(`🤖 Analyzing with Ollama AI (${analysisDepth} mode)...`);

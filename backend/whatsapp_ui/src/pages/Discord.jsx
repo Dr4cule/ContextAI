@@ -427,19 +427,22 @@ export default function Discord() {
                         <h4>🤖 AI Summary</h4>
                       </div>
                       <div className="summary-content-text">
-                        {currentSummary.summary.split('\n').map((line, i) => (
-                          <p key={i} className="summary-line">
-                            {line.trim() && (
-                              line.startsWith('**') ? (
-                                <strong>{line.replace(/\*\*/g, '')}</strong>
-                              ) : line.startsWith('*') ? (
-                                <span className="bullet-point">{line.replace(/^\*\s*/, '• ')}</span>
-                              ) : (
-                                line
-                              )
-                            )}
-                          </p>
-                        ))}
+                        {currentSummary.summary.split('\n').map((line, i) => {
+                          const trimmed = line.trim()
+                          if (!trimmed) return null
+                          const boldHeader = trimmed.match(/^\*\*(.+?)\*\*:?$/)
+                          if (boldHeader) {
+                            return <p key={i} className="summary-line"><strong>{boldHeader[1]}</strong></p>
+                          }
+                          if (/^[-•*]\s+/.test(trimmed)) {
+                            return (
+                              <p key={i} className="summary-line">
+                                <span className="bullet-point">{trimmed.replace(/^[-•*]\s+/, '')}</span>
+                              </p>
+                            )
+                          }
+                          return <p key={i} className="summary-line">{trimmed}</p>
+                        })}
                       </div>
                     </div>
 

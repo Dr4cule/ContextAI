@@ -359,14 +359,40 @@ export default function WhatsApp() {
       .replace(/'/g, '&#39;')
   }
 
+  // Escape, then turn **bold** into styled spans. Escaping happens before any
+  // tag is injected, so this is safe to feed to dangerouslySetInnerHTML.
+  function formatInline(text) {
+    return escapeHtml(text).replace(
+      /\*\*(.+?)\*\*/g,
+      '<strong class="text-gold">$1</strong>'
+    )
+  }
+
+  // Parse the summary one line at a time. The previous version chained several
+  // regexes over the whole blob, which double-wrapped header lines like
+  // "**📊 Overview**" and produced broken/empty markup. Classifying each line
+  // exactly once is both correct and predictable.
   function formatAISummary(text) {
-    if (!text) return null
-    return escapeHtml(text)
-      .replace(/\*\*(.*?)\*\*/g, '<strong class="text-gold">$1</strong>')
-      .replace(/(📋|✅|📌|💭|⭐|📊|👥|⚡|🔍)\s*([^\n]+)/g, '<div class="emoji-header">$1 $2</div>')
-      .replace(/\*\s+([^*\n]+)/g, '<div class="bullet">• $1</div>')
-      .replace(/^[-•]\s+(.+)$/gm, '<div class="bullet">• $1</div>')
-      .replace(/\n\n/g, '<div class="spacer"></div>')
+    if (!text) return ''
+    const out = []
+    for (const rawLine of String(text).split('\n')) {
+      const line = rawLine.trim()
+      if (!line) {
+        out.push('<div class="spacer"></div>')
+        continue
+      }
+      const boldHeader = line.match(/^\*\*(.+?)\*\*:?$/)
+      if (/^#{1,4}\s+/.test(line)) {
+        out.push(`<div class="emoji-header">${formatInline(line.replace(/^#{1,4}\s+/, ''))}</div>`)
+      } else if (boldHeader) {
+        out.push(`<div class="emoji-header">${formatInline(boldHeader[1])}</div>`)
+      } else if (/^[-•*]\s+/.test(line)) {
+        out.push(`<div class="bullet">• ${formatInline(line.replace(/^[-•*]\s+/, ''))}</div>`)
+      } else {
+        out.push(`<div class="summary-line">${formatInline(line)}</div>`)
+      }
+    }
+    return out.join('')
   }
 
   function copySummaryToClipboard(chatId) {
@@ -781,7 +807,7 @@ export default function WhatsApp() {
                       </div>
                     </div>
 
-                    {currentSummary.participants && Object.keys(currentSummary.participants).length <= 20 && (
+                    {currentSummary.participants && Object.keys(currentSummary.participants).length > 0 && (
                       <div className="participants-section">
                         <h4>👥 Top Contributors</h4>
                         <div className="participants-list">

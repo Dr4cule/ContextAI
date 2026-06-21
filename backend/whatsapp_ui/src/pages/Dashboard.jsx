@@ -244,11 +244,15 @@ export default function Dashboard() {
               <div className="summary-body">
                 {s.aiSummary ? (
                   <div className="ai-summary">
-                    {s.aiSummary.split('\n').slice(0, 6).map((l, i) => (
-                      <div key={i} className="summary-line">
-                        {l.trim() && `• ${l.replace(/^[-•*]\s*/, '')}`}
-                      </div>
-                    ))}
+                    {s.aiSummary
+                      .split('\n')
+                      .filter(l => l.trim())
+                      .slice(0, 6)
+                      .map((l, i) => (
+                        <div key={i} className="summary-line">
+                          {`• ${l.replace(/^[-•*]\s*/, '').replace(/\*\*/g, '')}`}
+                        </div>
+                      ))}
                   </div>
                 ) : (
                   <div className="no-summary">(no AI summary)</div>

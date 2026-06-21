@@ -1279,6 +1279,88 @@ app.post("/api/chats/refresh", async (req, res) => {
   });
 });
 
+// Resolve author display names and return text messages with stable
+// attribution. Shared by /api/messages and /api/chat-qa so both speak about
+// the same participants. Handles linked-device "@lid" ids and never collapses
+// senders into the chat/group name. Returns { textMessages, nameByNumber }.
+async function attributeMessages(chat, messages) {
+  const authorNameById = {}; // "123@c.us" | "123@lid" -> "Alice"
+  const nameByNumber = {}; // "123" -> "Alice" (for @mention resolution)
+
+  const resolveContactName = async (id) => {
+    try {
+      const contact = await client.getContactById(id);
+      return contact.name || contact.pushname || contact.verifiedName || null;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const uniqueAuthorIds = [
+    ...new Set(messages.map((m) => m.author || m.from).filter(Boolean)),
+  ];
+  for (const id of uniqueAuthorIds) {
+    const num = String(id).split("@")[0];
+    const name = (await resolveContactName(id)) || "+" + num;
+    authorNameById[id] = name;
+    nameByNumber[num] = name;
+  }
+
+  // Map members who didn't post too, so @mentions of them still resolve.
+  if (chat.isGroup && Array.isArray(chat.participants)) {
+    for (const participant of chat.participants.slice(0, 60)) {
+      if (!nameByNumber[participant.id.user]) {
+        nameByNumber[participant.id.user] =
+          (await resolveContactName(participant.id._serialized)) ||
+          "+" + participant.id.user;
+      }
+    }
+  }
+
+  const textMessages = messages
+    .filter((m) => m.body && m.body.trim())
+    .map((m) => {
+      const authorId = m.author || m.from || "";
+      const authorNumber = authorId
+        ? String(authorId).split("@")[0]
+        : "Unknown";
+
+      let authorName;
+      if (m.fromMe) {
+        authorName = "You";
+      } else if (chat.isGroup) {
+        authorName =
+          authorNameById[authorId] ||
+          nameByNumber[authorNumber] ||
+          "+" + authorNumber;
+      } else {
+        authorName =
+          chat.name || authorNameById[authorId] || "+" + authorNumber;
+      }
+
+      const cleanedBody = String(m.body).replace(
+        /@(\d{10,15})/g,
+        (match, userId) => {
+          const mentionedName = nameByNumber[userId];
+          return mentionedName ? `@${mentionedName}` : match;
+        }
+      );
+
+      return {
+        id: m.id._serialized,
+        body: cleanedBody,
+        timestamp: m.timestamp,
+        from: m.from,
+        fromMe: m.fromMe,
+        author: m.author || m.from,
+        authorName,
+        authorNumber,
+      };
+    });
+
+  return { textMessages, nameByNumber };
+}
+
 // Get chat messages and summary
 app.post("/api/messages", async (req, res) => {
   if (!isReady) {
@@ -1302,71 +1384,15 @@ app.post("/api/messages", async (req, res) => {
     const messages = await chat.fetchMessages({ limit: parseInt(limit) });
     console.log(`✅ Retrieved ${messages.length} messages`);
 
-    // Get participant info with names
-    const participantMap = {};
-
-    // For groups, get contact names
-    if (chat.isGroup) {
-      console.log(`👥 Fetching participant info for group...`);
-      for (const participant of chat.participants) {
-        try {
-          const contact = await client.getContactById(
-            participant.id._serialized
-          );
-          // Try to get the best name available
-          const name =
-            contact.name || contact.pushname || contact.verifiedName || null;
-          if (name) {
-            participantMap[participant.id.user] = name;
-          } else {
-            // Format phone number: +1234567890 instead of 1234567890
-            participantMap[participant.id.user] = "+" + participant.id.user;
-          }
-        } catch (err) {
-          // Format phone number: +1234567890 instead of 1234567890
-          participantMap[participant.id.user] = "+" + participant.id.user;
-        }
-      }
-      console.log(
-        `✅ Loaded ${Object.keys(participantMap).length} participant names`
-      );
-    }
-
-    const textMessages = messages
-      .filter((m) => m.body && m.body.trim())
-      .map((m) => {
-        const authorNumber = m.author
-          ? m.author.split("@")[0]
-          : m.from
-          ? m.from.split("@")[0]
-          : "Unknown";
-        // Use participant map if available, otherwise format phone number
-        let authorName = participantMap[authorNumber];
-        if (!authorName) {
-          // For individual chats or unmapped participants, try to get contact name
-          authorName = chat.name || "+" + authorNumber;
-        }
-
-        // Replace @mentions in message body with actual names
-        let cleanedBody = m.body;
-        // Match @12345678901234567 pattern (WhatsApp user ID mentions)
-        const mentionPattern = /@(\d{10,15})/g;
-        cleanedBody = cleanedBody.replace(mentionPattern, (match, userId) => {
-          const mentionedName = participantMap[userId];
-          return mentionedName ? `@${mentionedName}` : match;
-        });
-
-        return {
-          id: m.id._serialized,
-          body: cleanedBody, // Use cleaned body with resolved @mentions
-          timestamp: m.timestamp,
-          from: m.from,
-          fromMe: m.fromMe,
-          author: m.author || m.from,
-          authorName: authorName,
-          authorNumber: authorNumber,
-        };
-      });
+    // Resolve participant names + attribute every message (handles @lid ids,
+    // never collapses senders into the group name). See attributeMessages().
+    const { textMessages, nameByNumber } = await attributeMessages(
+      chat,
+      messages
+    );
+    console.log(
+      `✅ Resolved ${Object.keys(nameByNumber).length} participant name(s)`
+    );
 
     console.log(`📝 Processed ${textMessages.length} text messages`);
 
@@ -1448,7 +1474,7 @@ This chat has no messages in the selected range (${limit} messages).
       textMessages: textMessages.length,
       dateRange,
       participants,
-      participantMap,
+      participantMap: nameByNumber,
       messages: textMessages,
       aiSummary,
       source: "whatsapp", // Add source identifier
@@ -1580,7 +1606,7 @@ Be concise but capture the essence of this conversation segment.`;
         ? `
 
 **👥 Key Contributors & Roles**
-* Notable participants and main contributions (each on new line)`
+- Notable participants and their main contributions (one per line)`
         : "";
 
     const finalPrompt = `You have analyzed ${messages.length} WhatsApp messages from "${chatName}" (${chatType})${participantsNote} in ${batches.length} batches.
@@ -1589,30 +1615,28 @@ Here are the batch summaries:
 
 ${consolidatedContext}
 
-Create a CONCISE summary using ONLY SHORT bullet points. Put EACH point on a NEW LINE:
+Write a CONCISE final summary in clean markdown. Use the exact section headers below, each on its own line. Under each header use bullets starting with "- " (a dash), one per line. Never put two bullets on the same line.
 
 **📊 Conversation Overview**
-* High-level summary (one line)
+- High-level summary (one line)
 
 **📋 Main Topics & Themes**
-* Key topic (each on new line, 5-7 max)
+- Key topic (5-7 max)
 
 **✅ Decisions & Agreements**
-* Important decision (each on new line)
+- Important decision
 
 **📌 Action Items & Next Steps**
-* Specific task: owner (each on new line)${contributorSection}
+- Specific task: owner${contributorSection}
 
 **💭 Sentiment & Tone Analysis**
-* Overall tone (one line)
+- Overall tone (one line)
 
 **⚡ Critical Highlights**
-* Important moment (each on new line, 2-3 max)
+- Important moment (2-3 max)
 
 **🔍 Patterns & Insights**
-* Recurring theme (each on new line)
-
-IMPORTANT: Each bullet (*) MUST start on its own line.`;
+- Recurring theme`;
 
     try {
       const model = getGeminiModel();
@@ -1648,8 +1672,8 @@ IMPORTANT: Each bullet (*) MUST start on its own line.`;
     const contributorSection = includeContributors
       ? `
 
-**👥 Top 3 Contributors**
-- Name: count`
+**👥 Top Contributors**
+- The 3 most active people and what each focused on (one per line)`
       : "";
 
     // Different prompts based on analysis depth
@@ -1674,82 +1698,69 @@ DEEP ANALYSIS INSTRUCTIONS:
 Messages:
 ${messageContext}
 
-Create a COMPREHENSIVE analysis with SHORT bullet points (each on NEW LINE):
+Write the analysis in clean markdown. Use the exact section headers below, each on its own line. Under each header use bullets starting with "- " (a dash), one per line. Never put two bullets on the same line. Attribute points to participants by name where relevant, and provide context/explanation rather than bare lists.
 
 **📊 Deep Context Analysis**
-* Overall purpose of this conversation
-* Background context and setting
-* Key relationships between participants (if visible)
+- Overall purpose of this conversation
+- Background context and setting
+- Key relationships between participants (if visible)
 
-**📋 Topics & Themes** (detailed)
-* Main topic with context and why it matters
-* Related subtopics and their connections
-* Technical terms explained (if any)
+**📋 Topics & Themes**
+- Main topic with context and why it matters
+- Related subtopics and their connections
+- Technical terms explained (if any)
 
 **✅ Decisions & Reasoning**
-* Decision made
-* Reasoning behind it (if mentioned)
-* Impact or implications
+- Decision, the reasoning behind it, and its impact
 
 **📌 Action Items & Dependencies**
-* Task: Owner (with deadline if mentioned)
-* Prerequisites or dependencies
-* Follow-up needed
-
-${contributorSection}
+- Task: owner (with deadline if mentioned), plus any dependencies${contributorSection}
 
 **💭 Sentiment & Dynamics**
-* Overall emotional tone
-* Shifts in mood or energy
-* Group dynamics observed
+- Overall emotional tone and any shifts in mood
+- Group dynamics observed
 
 **⚡ Critical Insights** (3-5)
-* Important moment with deeper meaning
-* Why this matters in context
-* Potential implications
+- Important moment, why it matters, and its implications
 
 **🔍 Patterns & Predictions**
-* Recurring themes or behaviors
-* Potential future directions
-* Risks or opportunities identified
+- Recurring themes, likely next steps, risks or opportunities
 
 **🎯 Key Takeaways**
-* Most important insight (each on new line, 2-3 max)
-
-IMPORTANT: 
-- Each bullet (*) MUST start on its own line
-- Provide CONTEXT and EXPLANATION, not just listing
-- If you see technical terms or references, briefly explain them
-- Connect ideas and show relationships`;
+- Most important insight (2-3 max)`;
     } else {
       // Moderate (standard) analysis
       prompt = `Analyze "${chatName}" - ${messages.length} messages${
         participantCount > 20 ? ` (${participantCount} participants)` : ""
-      }. Create SHORT bullet summary:
+      }. Write a SHORT summary in clean markdown.
+
+Formatting rules:
+- Use the exact section headers below, each on its own line.
+- Under each header, write bullets starting with "- " (a dash), one per line.
+- Use participant names (e.g. "Alice:") when noting who said or did something.
+- Never put two bullets on the same line. Keep bullets short.
 
 **📊 Overview**
-* Single line summary
-* Timeframe
+- One-line summary
+- Timeframe
 
 **📋 Topics** (3-5 max)
-* Topic (each on new line)
+- Topic
 
 **✅ Decisions**
-* Decision (if any, each on new line)
+- Decision (omit if none)
 
-**📌 Actions**  
-* Task: Owner (if any, each on new line)${contributorSection}
+**📌 Actions**
+- Task: owner (omit if none)${contributorSection}
 
 **💭 Tone**
-* One line
+- One line
 
 **⚡ Highlights** (2-3 max)
-* Key moment (each on new line)
+- Key moment
 
 Messages:
-${messageContext}
-
-IMPORTANT: Put each bullet point on a NEW LINE. Do NOT continue points on same line after asterisk (*).`;
+${messageContext}`;
     }
 
     try {
@@ -1784,7 +1795,51 @@ IMPORTANT: Put each bullet point on a NEW LINE. Do NOT continue points on same l
   return summaryText;
 }
 
-// Q&A endpoint - NOW POWERED BY OUR RAG SERVER
+// Answer a question directly from a chat's own messages (no RAG mapping
+// required). Fetches recent messages, attributes them to participants, and
+// asks the model for a short, specific answer. Returns { answer, contextMessages }.
+async function answerFromChatMessages(chatId, question, messageLimit) {
+  const chat = await client.getChatById(chatId);
+  const messages = await chat.fetchMessages({
+    limit: parseInt(messageLimit) || 200,
+  });
+  const { textMessages } = await attributeMessages(chat, messages);
+
+  if (textMessages.length === 0) {
+    return {
+      answer:
+        "There are no text messages in this chat to answer from (it may be media-only or empty).",
+      contextMessages: 0,
+    };
+  }
+
+  const context = textMessages.map((m) => `${m.authorName}: ${m.body}`).join("\n");
+  const chatName = chat.name || chat.id.user;
+  const qaPrompt = `You are answering a question about a WhatsApp conversation titled "${chatName}".
+
+Conversation (most recent ${textMessages.length} messages, one "Name: message" per line):
+${context}
+
+Question: ${question}
+
+Answer in 2-4 sentences, directly and specifically. Cite participant names where relevant. If the answer is not present in the conversation, say so plainly instead of guessing.`;
+
+  const answer = await queueAIRequest(async () => {
+    const model = getGeminiModel();
+    const result = await retryWithBackoff(
+      async (altModel) => (altModel || model).generateContent(qaPrompt),
+      3,
+      2000
+    );
+    return result.response.text();
+  }, 5);
+
+  return { answer, contextMessages: textMessages.length };
+}
+
+// Per-chat Q&A. Uses the RAG server for chats that are mapped/ingested into a
+// project; otherwise (and if RAG fails) it falls back to answering directly
+// from the chat's messages, so the "Ask Questions" box works for ANY chat.
 app.post("/api/chat-qa", async (req, res) => {
   if (!isReady) {
     return res.status(503).json({ error: "WhatsApp not connected" });
@@ -1796,43 +1851,45 @@ app.post("/api/chat-qa", async (req, res) => {
     return res.status(400).json({ error: "chatId and question required" });
   }
 
-  console.log(`[RAG] New Q&A Request for chat: ${chatId}`);
-  console.log(`[RAG] Question: ${question}`);
+  console.log(`[Q&A] Request for chat: ${chatId} - "${question}"`);
 
-  // 1. Find the project/team mapping
   const mapping = projectMapping[chatId];
-  if (!mapping) {
-    console.error(`[RAG] No project mapping found for chat: ${chatId}`);
-    return res
-      .status(404)
-      .json({ error: "This chat is not mapped to a project." });
+
+  // Mapped chats: prefer the RAG server (retrieves across the full ingested
+  // history), but fall back to direct message Q&A if it errors out.
+  if (mapping) {
+    try {
+      const ragResponse = await axios.post("http://localhost:3000/api/v1/ask", {
+        project_id: mapping.project_id,
+        team_id: mapping.team_id,
+        question,
+      });
+      console.log("[Q&A] RAG answer generated");
+      return res.json({
+        question,
+        answer: ragResponse.data.answer,
+        chatName: mapping.project_id,
+        contextMessages: 0,
+      });
+    } catch (err) {
+      console.warn(
+        "[Q&A] RAG unavailable, falling back to direct message Q&A:",
+        err.message
+      );
+    }
   }
 
-  // 2. Build the payload for our backend-server
-  const ragPayload = {
-    project_id: mapping.project_id,
-    team_id: mapping.team_id,
-    question: question,
-  };
-
-  // 3. Call the RAG server's "ask" endpoint
+  // Unmapped chats (or RAG fallback): answer straight from the messages.
   try {
-    // We point to our other server: http://localhost:3000
-    const ragResponse = await axios.post(
-      "http://localhost:3000/api/v1/ask",
-      ragPayload
+    const { answer, contextMessages } = await answerFromChatMessages(
+      chatId,
+      question,
+      messageLimit
     );
-
-    // 4. Send the RAG server's answer directly to the frontend
-    console.log("[RAG] Answer generated:", ragResponse.data.answer);
-    res.json({
-      question: question,
-      answer: ragResponse.data.answer,
-      chatName: mapping.project_id, // Use project_id as a placeholder
-      contextMessages: 0, // We don't know this, so we send 0
-    });
+    console.log(`[Q&A] Direct answer generated from ${contextMessages} messages`);
+    res.json({ question, answer, chatName: chatId, contextMessages });
   } catch (err) {
-    console.error("❌ RAG Q&A Error:", err.message);
+    console.error("❌ Q&A Error:", err.message);
     res.status(500).json({
       error: "Failed to answer question",
       message: err.message,
