@@ -392,6 +392,9 @@ function initializeClient() {
     authStrategy: new LocalAuth({
       dataPath: ".wwebjs_auth",
     }),
+    // Cache the WhatsApp Web build locally so cold starts don't re-download it
+    // every launch (faster, more stable startup -> chats sync sooner).
+    webVersionCache: { type: "local" },
     puppeteer: {
       headless: true,
       args: [
@@ -421,29 +424,39 @@ function initializeClient() {
   client.on("ready", async () => {
     console.log("✅ WhatsApp is ready!");
 
-    // Wait longer for client to fully initialize after re-login
-    const waitTime = isReconnecting ? 30000 : 5000; // Increased from 15s to 30s for reconnection
+    // Instead of blindly sleeping a fixed 5s/30s, actively wait until the WA
+    // Web store has actually populated the chat list, then proceed
+    // immediately. On most logins the chats are present within ~1-2s, so this
+    // removes the bulk of the old "stuck on syncing" wait while still giving a
+    // slow first sync up to the cap before we mark ready.
+    const maxWait = isReconnecting ? 30000 : 15000;
+    const syncedCount = await waitForChatsSynced(maxWait);
     console.log(
-      `⏳ Waiting ${waitTime / 1000}s for client to fully initialize${
-        isReconnecting ? " (reconnecting - allowing chat sync time)" : ""
-      }...`
+      `⏳ Chat store ready after sync wait (${syncedCount} chats visible)`
     );
-    await new Promise((resolve) => setTimeout(resolve, waitTime));
 
     isReady = true;
     currentQR = null;
     isLoggingOut = false;
 
-    // Keep reconnecting flag for a bit longer to allow chat fetching to use extended timeout
+    // Keep reconnecting flag briefly so the first fetch still gets the extended
+    // timeout, but far shorter than before now that we wait for real readiness.
     const wasReconnecting = isReconnecting;
     if (isReconnecting) {
       setTimeout(() => {
         isReconnecting = false;
         console.log("✅ Reconnection stabilization complete");
-      }, 60000); // Keep flag for 60s to allow first few chat fetches to use extended timeout
+      }, 20000);
     }
 
     botStartTime = Date.now(); // Mark when bot became ready
+
+    // Warm the chat cache immediately so the UI's first /api/chats poll gets
+    // the list right away instead of triggering the fetch and waiting another
+    // poll cycle.
+    refreshChatsCache().catch((err) =>
+      console.error("❌ Initial chat warm-up failed:", err.message)
+    );
 
     console.log(
       "💡 WhatsApp ready - bot will only respond to NEW mentions after this point"
@@ -1051,6 +1064,70 @@ app.get("/api/qr", (req, res) => {
   }
 });
 
+// Poll the WhatsApp Web store until the chat list has populated (or maxMs
+// elapses). Returns how many chats are visible. This lets us proceed the
+// moment chats are actually available instead of sleeping a fixed,
+// conservative amount of time after the "ready" event.
+async function waitForChatsSynced(maxMs) {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    try {
+      const count = await client.pupPage.evaluate(() => {
+        try {
+          const store = window.Store && window.Store.Chat;
+          return store && typeof store.getModelsArray === "function"
+            ? store.getModelsArray().length
+            : -1;
+        } catch (_) {
+          return -1;
+        }
+      });
+      if (count > 0) return count;
+    } catch (_) {
+      // Page/store not ready yet - keep waiting.
+    }
+    await new Promise((r) => setTimeout(r, 600));
+  }
+  return 0;
+}
+
+// Lightweight chat-list read straight from the WA Web store. This skips the
+// heavy per-chat model construction + last-message fetch that
+// client.getChats() performs, which is the main reason chat sync felt slow on
+// accounts with many chats. Guarded so any future store change just falls back
+// to the official getChats() path.
+async function fetchChatsFast() {
+  if (!client || !client.pupPage) return null;
+  try {
+    return await client.pupPage.evaluate(() => {
+      const store = window.Store && window.Store.Chat;
+      if (!store || typeof store.getModelsArray !== "function") return null;
+      return store.getModelsArray().map((c) => {
+        const contact = c.contact || {};
+        return {
+          id: c.id._serialized,
+          name:
+            c.formattedTitle ||
+            c.name ||
+            contact.name ||
+            contact.pushname ||
+            (c.id && c.id.user) ||
+            "Unknown Contact",
+          isGroup: !!c.isGroup,
+          unreadCount: c.unreadCount || 0,
+          timestamp: c.t || 0,
+        };
+      });
+    });
+  } catch (err) {
+    console.log(
+      "   ⚠️ Fast chat fetch unavailable, falling back to getChats():",
+      err.message
+    );
+    return null;
+  }
+}
+
 async function refreshChatsCache() {
   if (!isReady) {
     throw new Error("WhatsApp not connected");
@@ -1065,15 +1142,14 @@ async function refreshChatsCache() {
     console.log(`📋 Fetching all chats...`);
     const startTime = Date.now();
 
-    // Retry logic to handle "Evaluation failed" errors
-    let chats = [];
+    // Retry logic to handle "Evaluation failed" errors during early sync.
+    let mapped = null;
     let retries = 3;
 
     while (retries > 0) {
       try {
         // WhatsApp Web can take a while to finish post-login sync.
         const fetchTimeout = isReconnecting ? 120000 : 90000;
-
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(
             () => reject(new Error("Timeout fetching chats")),
@@ -1081,7 +1157,21 @@ async function refreshChatsCache() {
           )
         );
 
-        chats = await Promise.race([client.getChats(), timeoutPromise]);
+        // Prefer the fast in-page projection; fall back to getChats() if the
+        // store isn't queryable or returns nothing.
+        const fast = await Promise.race([fetchChatsFast(), timeoutPromise]);
+        if (fast && fast.length > 0) {
+          mapped = fast;
+        } else {
+          const chats = await Promise.race([client.getChats(), timeoutPromise]);
+          mapped = chats.map((chat) => ({
+            id: chat.id._serialized,
+            name: chat.name || chat.id.user || "Unknown Contact",
+            isGroup: chat.isGroup,
+            unreadCount: chat.unreadCount || 0,
+            timestamp: chat.timestamp || 0,
+          }));
+        }
 
         break; // Success, exit retry loop
       } catch (err) {
@@ -1095,7 +1185,7 @@ async function refreshChatsCache() {
           console.log(
             `   ⚠️ WhatsApp not ready, retrying... (${retries} attempts left)`
           );
-          await new Promise((resolve) => setTimeout(resolve, 5000));
+          await new Promise((resolve) => setTimeout(resolve, 2500));
           continue;
         }
 
@@ -1103,25 +1193,8 @@ async function refreshChatsCache() {
       }
     }
 
-    console.log(
-      `✅ Retrieved ${chats.length} chats in ${Date.now() - startTime}ms`
-    );
-
-    // Map to minimal data WITHOUT fetching contact details
-    allChats = chats.map((chat) => {
-      let displayName = chat.name || chat.id.user || "Unknown Contact";
-
-      return {
-        id: chat.id._serialized,
-        name: displayName,
-        isGroup: chat.isGroup,
-        unreadCount: chat.unreadCount || 0,
-        timestamp: chat.timestamp || Date.now(),
-      };
-    });
-
     // Sort by most recent
-    allChats.sort((a, b) => b.timestamp - a.timestamp);
+    allChats = (mapped || []).sort((a, b) => b.timestamp - a.timestamp);
 
     const totalTime = Date.now() - startTime;
     console.log(`✅ Processed ${allChats.length} chats in ${totalTime}ms`);
