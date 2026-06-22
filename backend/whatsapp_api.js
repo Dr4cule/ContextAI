@@ -17,7 +17,14 @@ const sharp = require("sharp");
 
 const axios = require("axios");
 const projectMapping = require("./project_mapping.json");
-const INGEST_SERVER_URL = "http://localhost:3000/api/v1/ingest";
+
+// RAG server base URL. Defaults to localhost for a plain `node` run; in Docker
+// it's set to the compose service name (e.g. http://rag:3000).
+const RAG_SERVER_URL = (
+  process.env.RAG_SERVER_URL || "http://localhost:3000"
+).replace(/\/+$/, "");
+const INGEST_SERVER_URL = `${RAG_SERVER_URL}/api/v1/ingest`;
+const RAG_ASK_URL = `${RAG_SERVER_URL}/api/v1/ask`;
 
 // Load environment variables
 require("dotenv").config();
@@ -406,7 +413,9 @@ function initializeClient() {
         "--no-zygote",
         "--disable-gpu",
       ],
-      executablePath: undefined, // Use bundled Chromium
+      // In Docker we point at the system Chromium via PUPPETEER_EXECUTABLE_PATH;
+      // locally this is unset and whatsapp-web.js uses its bundled Chromium.
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     },
   });
 
@@ -797,10 +806,7 @@ Provide a clear summary in 3-5 bullet points.`;
           `[RAG-BOT] Sending question to RAG server: "${messageText}"`
         );
         try {
-          const ragResponse = await axios.post(
-            "http://localhost:3000/api/v1/ask",
-            ragPayload
-          );
+          const ragResponse = await axios.post(RAG_ASK_URL, ragPayload);
           const ragAnswer = ragResponse.data.answer;
 
           console.log(
@@ -1859,7 +1865,7 @@ app.post("/api/chat-qa", async (req, res) => {
   // history), but fall back to direct message Q&A if it errors out.
   if (mapping) {
     try {
-      const ragResponse = await axios.post("http://localhost:3000/api/v1/ask", {
+      const ragResponse = await axios.post(RAG_ASK_URL, {
         project_id: mapping.project_id,
         team_id: mapping.team_id,
         question,

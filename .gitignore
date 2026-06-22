@@ -65,4 +65,5 @@ desktop.ini
 
 # Agent / tooling scratch
 .agents/
+.commandcode/
 skills-lock.json

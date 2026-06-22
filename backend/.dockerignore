@@ -1,0 +1,21 @@
+# Keep the backend image lean and correct. The UI lives in a subfolder and has
+# its own image, so it must NOT be copied into the backend build.
+node_modules
+whatsapp_ui
+
+# WhatsApp session / cache (persisted via a named volume at runtime instead)
+.wwebjs_auth
+.wwebjs_cache
+.wwebjs_auth.old-*
+
+# Secrets & runtime state
+.env
+.env.*
+contextai_discord_summaries
+summaries.json
+
+# Docker + misc
+Dockerfile
+.dockerignore
+*.log
+npm-debug.log*

@@ -1,5 +1,13 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
+import {
+  LayoutDashboard,
+  MessageCircle,
+  Hash,
+  Info,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import WhatsApp from './pages/WhatsApp'
 import Discord from './pages/Discord'
@@ -7,43 +15,11 @@ import About from './pages/About'
 import { useJobs } from './state/jobsStore'
 import './styles.css'
 
-// Minimal line icons (stroke = currentColor) keep the nav crisp at any size.
-const Icon = {
-  dashboard: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="3" width="7" height="7" rx="1.5" />
-      <rect x="14" y="3" width="7" height="7" rx="1.5" />
-      <rect x="3" y="14" width="7" height="7" rx="1.5" />
-      <rect x="14" y="14" width="7" height="7" rx="1.5" />
-    </svg>
-  ),
-  whatsapp: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 11.5a8.5 8.5 0 0 1-12.6 7.4L3 21l2.1-5.4A8.5 8.5 0 1 1 21 11.5Z" />
-    </svg>
-  ),
-  discord: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="4" y1="9" x2="20" y2="9" />
-      <line x1="4" y1="15" x2="20" y2="15" />
-      <line x1="11" y1="3" x2="9" y2="21" />
-      <line x1="17" y1="3" x2="15" y2="21" />
-    </svg>
-  ),
-  about: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="9" />
-      <line x1="12" y1="11" x2="12" y2="16" />
-      <circle cx="12" cy="7.5" r="0.6" fill="currentColor" stroke="none" />
-    </svg>
-  ),
-}
-
 const NAV = [
-  { to: '/', end: true, label: 'Dashboard', icon: 'dashboard' },
-  { to: '/whatsapp', label: 'WhatsApp', icon: 'whatsapp' },
-  { to: '/discord', label: 'Discord', icon: 'discord' },
-  { to: '/about', label: 'About', icon: 'about' },
+  { to: '/', end: true, label: 'Dashboard', Icon: LayoutDashboard },
+  { to: '/whatsapp', label: 'WhatsApp', Icon: MessageCircle },
+  { to: '/discord', label: 'Discord', Icon: Hash },
+  { to: '/about', label: 'About', Icon: Info },
 ]
 
 function GlobalJobBar() {
@@ -63,8 +39,16 @@ function GlobalJobBar() {
 }
 
 export default function App() {
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem('contextai_sidebar_collapsed') === '1' } catch (e) { return false }
+  })
+
+  useEffect(() => {
+    try { localStorage.setItem('contextai_sidebar_collapsed', collapsed ? '1' : '0') } catch (e) {}
+  }, [collapsed])
+
   return (
-    <div className="app-root">
+    <div className={`app-root ${collapsed ? 'collapsed' : ''}`}>
       <aside className="app-sidebar">
         <div className="sidebar-brand">
           <span className="brand-mark">◆</span>
@@ -72,13 +56,23 @@ export default function App() {
         </div>
 
         <nav className="sidebar-nav">
-          {NAV.map((item) => (
-            <NavLink key={item.to} to={item.to} end={item.end} className="sidebar-link">
-              <span className="sidebar-link-icon">{Icon[item.icon]}</span>
-              <span className="sidebar-link-label">{item.label}</span>
+          {NAV.map(({ to, end, label, Icon }) => (
+            <NavLink key={to} to={to} end={end} className="sidebar-link" title={label}>
+              <span className="sidebar-link-icon"><Icon size={18} strokeWidth={2} /></span>
+              <span className="sidebar-link-label">{label}</span>
             </NavLink>
           ))}
         </nav>
+
+        <button
+          className="sidebar-collapse-btn"
+          onClick={() => setCollapsed((c) => !c)}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          <span className="collapse-label">Collapse</span>
+        </button>
 
         <div className="sidebar-foot">
           <span className="sidebar-foot-dot" />

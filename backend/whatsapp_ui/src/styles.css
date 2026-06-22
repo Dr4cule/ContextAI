@@ -99,6 +99,7 @@ body::before{
   border-right:1px solid var(--border);
   padding:18px 14px;
   position:relative;z-index:10;
+  transition:width 0.22s var(--ease);
 }
 .sidebar-brand{
   display:flex;align-items:center;gap:11px;
@@ -135,13 +136,35 @@ body::before{
   width:3px;height:20px;border-radius:0 3px 3px 0;background:var(--accent-grad);
 }
 
+.sidebar-collapse-btn{
+  display:flex;align-items:center;gap:11px;
+  width:100%;padding:10px 12px;margin-top:6px;
+  background:transparent;border:1px solid transparent;border-radius:10px;
+  color:var(--muted);font-size:13px;font-weight:550;
+  transition:all 0.18s var(--ease);
+}
+.sidebar-collapse-btn:hover{background:var(--surface-2);color:var(--text)}
+.sidebar-collapse-btn svg{flex-shrink:0}
+
 .sidebar-foot{
   display:flex;align-items:center;gap:8px;
   padding:12px 12px 4px;margin-top:8px;
   border-top:1px solid var(--border);
   font-size:11.5px;color:var(--muted);
 }
-.sidebar-foot-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px rgba(var(--green-rgb),0.7)}
+.sidebar-foot-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px rgba(var(--green-rgb),0.7);flex-shrink:0}
+
+/* Collapsed rail — driven by the toggle (persisted in localStorage) */
+.app-root.collapsed{--sidebar-w:70px}
+.app-root.collapsed .brand-word,
+.app-root.collapsed .sidebar-link-label,
+.app-root.collapsed .collapse-label,
+.app-root.collapsed .sidebar-foot span:last-child{display:none}
+.app-root.collapsed .sidebar-brand{justify-content:center;padding:8px 0 18px}
+.app-root.collapsed .sidebar-link,
+.app-root.collapsed .sidebar-collapse-btn{justify-content:center;padding:11px;gap:0}
+.app-root.collapsed .sidebar-link.active::before{left:-12px}
+.app-root.collapsed .sidebar-foot{justify-content:center;padding:12px 0 4px}
 
 .app-main{flex:1;min-width:0;display:flex;flex-direction:column}
 .app-content{flex:1;overflow:auto;padding:26px 30px}
@@ -623,15 +646,6 @@ input:focus-visible,textarea:focus-visible,select:focus-visible,button:focus-vis
   *,*::before,*::after{animation-duration:0.001ms !important;animation-iteration-count:1 !important;transition-duration:0.001ms !important}
 }
 
-@media (max-width:1024px){
-  .app-sidebar{width:72px;padding:18px 12px}
-  .brand-word,.sidebar-link-label,.sidebar-foot span{display:none}
-  .sidebar-brand{justify-content:center;padding:8px 0 18px}
-  .sidebar-link{justify-content:center;padding:11px}
-  .sidebar-link.active::before{left:-12px}
-  .sidebar-foot{justify-content:center}
-  .global-job-bar{left:96px}
-}
 @media (max-width:760px){
   .layout{flex-direction:column;height:auto}
   .left{width:100%}

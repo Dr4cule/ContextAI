@@ -14,6 +14,43 @@ This tool connects to WhatsApp Web and provides:
 - **Conversation Memory**: Bot maintains context across 50 messages per chat
 - **RAG Knowledge Base**: Optional retrieval-augmented Q&A — works out of the box with a built-in vector store (no database required), or PostgreSQL + pgvector when available
 
+## Quick Start (Docker)
+
+The fastest way to run the whole stack (RAG server, WhatsApp API, Discord API, and the UI) is Docker Compose.
+
+**Prerequisites**
+
+- [Docker](https://docs.docker.com/get-docker/) with Compose v2 (`docker compose`)
+- [Ollama](https://ollama.com/) running on your **host** machine with the models pulled:
+  ```bash
+  ollama pull minimax-m3:cloud
+  ollama pull nomic-embed-text
+  ```
+
+**Run it**
+
+```bash
+# (optional) override defaults — e.g. a remote Ollama or a Discord token
+cp .env.docker.example .env
+
+docker compose up --build
+```
+
+Then open:
+
+| Service   | URL                     |
+| --------- | ----------------------- |
+| **UI**    | http://localhost:5173   |
+| WhatsApp  | http://localhost:8002   |
+| Discord   | http://localhost:8004   |
+| RAG       | http://localhost:3000   |
+
+Open the UI, go to the **WhatsApp** page, and scan the QR code to log in. The session is saved in a Docker volume, so you won't need to re-scan on restart. The Discord bot token can be pasted in the **Discord** page (or set `DISCORD_BOT_TOKEN` in `.env`).
+
+> **Ollama runs on the host, not in a container.** The containers reach it via `host.docker.internal` (mapped automatically, including on Linux). If your Ollama lives elsewhere, set `OLLAMA_HOSTS` in `.env`.
+
+To stop: `docker compose down` (add `-v` to also wipe the saved WhatsApp session and RAG store).
+
 ## Technical Implementation
 
 ### Interesting Techniques
@@ -39,7 +76,8 @@ This tool connects to WhatsApp Web and provides:
 
 ### Fonts
 
-- **[Press Start 2P](https://fonts.google.com/specimen/Press+Start+2P)** - Primary UI font (retro pixel aesthetic)
+- **[Inter](https://fonts.google.com/specimen/Inter)** - Primary UI font
+- **[JetBrains Mono](https://fonts.google.com/specimen/JetBrains+Mono)** - Monospace accent for code and identifiers
 
 ## Project Structure
 

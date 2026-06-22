@@ -17,8 +17,13 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-// RAG Server Integration
-const INGEST_SERVER_URL = "http://localhost:3000/api/v1/ingest";
+// RAG Server Integration. Base URL defaults to localhost for a plain `node`
+// run; in Docker it's set to the compose service name (e.g. http://rag:3000).
+const RAG_SERVER_URL = (
+  process.env.RAG_SERVER_URL || "http://localhost:3000"
+).replace(/\/+$/, "");
+const INGEST_SERVER_URL = `${RAG_SERVER_URL}/api/v1/ingest`;
+const RAG_ASK_URL = `${RAG_SERVER_URL}/api/v1/ask`;
 const DISCORD_MAPPING_FILE = path.join(__dirname, "discord_mapping.json");
 
 // Load Discord-to-Project mapping
@@ -532,10 +537,7 @@ app.post("/api/qa", async (req, res) => {
       };
 
       try {
-        const ragResponse = await axios.post(
-          "http://localhost:3000/api/v1/ask",
-          ragPayload
-        );
+        const ragResponse = await axios.post(RAG_ASK_URL, ragPayload);
 
         console.log("[DISCORD-RAG] Answer generated from RAG server");
         return res.json({

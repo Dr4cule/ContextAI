@@ -1,0 +1,19 @@
+# Root .dockerignore — applies to the RAG image (its build context is the repo
+# root so it can include backend/llm.js). Keeps the context small; the backend
+# and UI images use their own contexts + .dockerignore files.
+**/node_modules
+**/.wwebjs_auth
+**/.wwebjs_auth.old-*
+**/.wwebjs_cache
+**/dist
+**/*.log
+**/.env
+**/.env.*
+.git
+.agents
+.run-logs
+backend/whatsapp_ui
+backend/contextai_discord_summaries
+backend/summaries.json
+server/rag_store.json
+server/data
