@@ -1,5 +1,7 @@
 # ContextAI
 
+![alt text](image.png)
+
 A chat-intelligence platform for **WhatsApp and Discord** with AI-powered summaries, intelligent bot responses, and an optional RAG knowledge base. Runs entirely on **Ollama** — using the `minimax-m3:cloud` reasoning model (text + vision) on `localhost:11434` by default — with multi-host load balancing and failover. No proprietary API keys required.
 
 ## What It Does
