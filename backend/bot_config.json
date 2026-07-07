@@ -1,4 +1,10 @@
 {
-  "enabled": false,
-  "groups": []
+  "enabled": true,
+  "groups": [
+    {
+      "id": "120363423195475952@g.us",
+      "name": "LinkedIn LARPers",
+      "personality": "hyderabadi"
+    }
+  ]
 }

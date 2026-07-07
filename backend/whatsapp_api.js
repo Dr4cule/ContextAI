@@ -390,10 +390,51 @@ function recordBotResponse(groupId) {
 }
 
 // Initialize WhatsApp client
+// Remove stale Chromium "Singleton" lock files from the session profile. When a
+// container (or the process) is killed without a clean shutdown, these locks
+// survive in the persisted .wwebjs_auth volume and make the NEXT Chromium
+// launch fail with "profile appears to be in use by another Chromium process".
+// Clearing them on every init makes restarts (especially in Docker) reliable.
+function clearChromiumSingletonLocks() {
+  try {
+    const base = path.join(__dirname, ".wwebjs_auth");
+    if (!fs.existsSync(base)) return;
+    const lockNames = ["SingletonLock", "SingletonSocket", "SingletonCookie"];
+    // Locks live in the profile dir(s): .wwebjs_auth itself and its session*/ subdirs.
+    const dirs = [base];
+    for (const entry of fs.readdirSync(base)) {
+      const full = path.join(base, entry);
+      try {
+        if (fs.statSync(full).isDirectory()) dirs.push(full);
+      } catch (_) {}
+    }
+    for (const dir of dirs) {
+      for (const name of lockNames) {
+        const f = path.join(dir, name);
+        try {
+          // Use lstat, not existsSync: on Linux SingletonLock is a symlink to
+          // "<host>-<pid>", so existsSync (which follows the link) returns false
+          // for a dangling lock. lstat sees the link itself.
+          fs.lstatSync(f);
+          fs.rmSync(f, { force: true });
+          console.log(`🧹 Removed stale Chromium ${name}`);
+        } catch (_) {
+          // Not present — nothing to clear.
+        }
+      }
+    }
+  } catch (_) {
+    // Non-critical.
+  }
+}
+
 function initializeClient() {
   if (client) {
     client.removeAllListeners();
   }
+
+  // Clear any stale profile locks before launching a fresh Chromium.
+  clearChromiumSingletonLocks();
 
   client = new Client({
     authStrategy: new LocalAuth({
@@ -682,7 +723,7 @@ function initializeClient() {
         }
 
         recordBotResponse(chat.id._serialized);
-        await message.reply(imageAnalysis);
+        await sendBotReply(message, imageAnalysis);
         console.log(`✅ Bot sent image analysis in ${chat.name}`);
         return;
       }
@@ -733,7 +774,7 @@ Provide a clear summary in 3-5 bullet points.`;
         console.log(`   🤖 Generating summary...`);
         const model = getGeminiModel();
         if (!model) {
-          await message.reply(
+          await sendBotReply(message, 
             "⚠️ AI engine unavailable. Check OLLAMA_HOSTS and that the Ollama server is running."
           );
           return;
@@ -759,7 +800,7 @@ Provide a clear summary in 3-5 bullet points.`;
         });
 
         recordBotResponse(chat.id._serialized);
-        await message.reply(
+        await sendBotReply(message, 
           `📋 *Summary of last ${numMessages} messages:*\n\n${summary}`
         );
         console.log(`✅ Bot sent summary in ${chat.name}`);
@@ -898,7 +939,7 @@ Respond naturally and helpfully as ${
       );
       const model = getGeminiModel();
       if (!model) {
-        await message.reply("⚠️ AI engine unavailable. Check OLLAMA_HOSTS and that the Ollama server is running.");
+        await sendBotReply(message, "⚠️ AI engine unavailable. Check OLLAMA_HOSTS and that the Ollama server is running.");
         return;
       }
 
@@ -932,7 +973,7 @@ Respond naturally and helpfully as ${
       recordBotResponse(chat.id._serialized);
 
       // Reply to the message
-      await message.reply(answer);
+      await sendBotReply(message, answer);
       console.log(
         `✅ Bot responded in ${chat.name} (mode: ${
           ragData ? "Personality + RAG Data" : "Pure Personality"
@@ -941,7 +982,7 @@ Respond naturally and helpfully as ${
     } catch (err) {
       console.error("❌ Message handling error:", err.message);
       try {
-        await message.reply(
+        await sendBotReply(message, 
           "I'm sorry, I encountered an error. Please try again."
         );
       } catch (e) {
@@ -2325,6 +2366,55 @@ function getPersonalityById(key) {
   return BOT_PERSONALITIES[key] || BOT_PERSONALITIES.hyderabadi;
 }
 
+// --- Bot-authored message tracking ---------------------------------------
+// The bot's own replies are also "fromMe", so without this they'd pollute the
+// self-personality (the bot would learn from itself). We persist the ids of
+// every message the bot sends and exclude them when analysing the owner.
+const BOT_SENT_FILE = path.join(__dirname, "bot_sent_messages.json");
+const BOT_SENT_MAX = 3000;
+let botSentMessageIds = new Set();
+let botSentOrder = [];
+
+function loadBotSentMessages() {
+  try {
+    if (fs.existsSync(BOT_SENT_FILE)) {
+      const arr = JSON.parse(fs.readFileSync(BOT_SENT_FILE, "utf8"));
+      if (Array.isArray(arr)) {
+        botSentOrder = arr.slice(-BOT_SENT_MAX);
+        botSentMessageIds = new Set(botSentOrder);
+        console.log(`🤖 Loaded ${botSentMessageIds.size} bot-sent message ids`);
+      }
+    }
+  } catch (err) {
+    console.log("⚠️ Could not load bot-sent message log:", err.message);
+  }
+}
+
+function recordBotSentMessage(sentMsg) {
+  try {
+    const id = sentMsg && sentMsg.id && sentMsg.id._serialized;
+    if (!id || botSentMessageIds.has(id)) return;
+    botSentMessageIds.add(id);
+    botSentOrder.push(id);
+    if (botSentOrder.length > BOT_SENT_MAX) {
+      const removed = botSentOrder.splice(0, botSentOrder.length - BOT_SENT_MAX);
+      removed.forEach((r) => botSentMessageIds.delete(r));
+    }
+    // Non-blocking persist.
+    fs.writeFile(BOT_SENT_FILE, JSON.stringify(botSentOrder), () => {});
+  } catch (_) {
+    // Non-critical.
+  }
+}
+
+// Single choke point for everything the bot says, so every outgoing message is
+// tagged as bot-authored (and thus excluded from self-personality training).
+async function sendBotReply(targetMsg, content) {
+  const sent = await targetMsg.reply(content);
+  recordBotSentMessage(sent);
+  return sent;
+}
+
 // Gather the account owner's OWN messages (fromMe) across recent chats, so we
 // have raw material to analyse their texting style. Bounded so it stays fast.
 async function collectOwnMessages(opts = {}) {
@@ -2347,6 +2437,7 @@ async function collectOwnMessages(opts = {}) {
       const msgs = await chat.fetchMessages({ limit: perChat });
       for (const m of msgs) {
         if (!m.fromMe) continue; // only the owner's own messages
+        if (m.id && botSentMessageIds.has(m.id._serialized)) continue; // not the bot's own replies
         const body = (m.body || "").trim();
         if (!body) continue;
         if (body.length > 500) continue; // skip forwards / long pastes
@@ -2442,8 +2533,9 @@ RULES:
   return selfPersonality;
 }
 
-// Load any previously trained self-personality on startup.
+// Load any previously trained self-personality + the bot-sent message log.
 loadSelfPersonality();
+loadBotSentMessages();
 
 // Pre-load conversation memory for bot-enabled groups
 async function preloadBotMemory() {
@@ -2791,7 +2883,7 @@ async function checkBotMessages() {
         // Generate AI response
         const model = getGeminiModel();
         if (!model) {
-          await mostRecentMention.reply(
+          await sendBotReply(mostRecentMention, 
             "⚠️ AI engine unavailable. Check OLLAMA_HOSTS and that the Ollama server is running."
           );
           continue;
@@ -2873,7 +2965,7 @@ Respond naturally - prioritize being helpful. If they ask about previous message
         // Record the response for spam protection
         recordBotResponse(chat.id._serialized);
 
-        await mostRecentMention.reply(response);
+        await sendBotReply(mostRecentMention, response);
         console.log(`✅ [POLL] Bot responded in ${chat.name}`);
       } catch (err) {
         console.warn(

@@ -49,6 +49,7 @@ yarn-error.log*
 .run-logs/
 backend/summaries.json
 backend/self_personality.json
+backend/bot_sent_messages.json
 server/rag_store.json
 backend/contextai_discord_summaries/
 
