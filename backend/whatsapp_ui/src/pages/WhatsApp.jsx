@@ -34,6 +34,9 @@ export default function WhatsApp() {
   const [showBotSelector, setShowBotSelector] = useState(false)
   const [personalities, setPersonalities] = useState([])
   const [loadingPersonalities, setLoadingPersonalities] = useState(false)
+  // "Just Like Me" self-persona (imitates the logged-in user)
+  const [selfPersona, setSelfPersona] = useState(null)
+  const [trainingSelf, setTrainingSelf] = useState(false)
   const [analysisDepth, setAnalysisDepth] = useState(() => {
     try { return localStorage.getItem('contextai_analysis_depth') || 'moderate' } catch (e) { return 'moderate' }
   })
@@ -61,10 +64,11 @@ export default function WhatsApp() {
     return () => clearInterval(tick)
   }, [])
 
-  // Load personalities on mount
+  // Load personalities + self-persona status on mount
   useEffect(() => {
     if (status.connected) {
       loadPersonalities()
+      loadSelfPersona()
     }
   }, [status.connected])
 
@@ -81,6 +85,40 @@ export default function WhatsApp() {
       console.warn('Failed to load personalities', err)
     } finally {
       setLoadingPersonalities(false)
+    }
+  }
+
+  async function loadSelfPersona() {
+    try {
+      const res = await axios.get('http://localhost:8002/api/bot/self-personality')
+      setSelfPersona(res.data || null)
+    } catch (err) {
+      console.warn('Failed to load self-persona', err)
+    }
+  }
+
+  async function trainSelfPersona() {
+    if (trainingSelf) return
+    setTrainingSelf(true)
+    startJob('self-persona-train', '🪞 Learning your texting style from your messages...')
+    try {
+      const res = await axios.post(
+        'http://localhost:8002/api/bot/self-personality/generate',
+        {},
+        { timeout: 180000 }
+      )
+      if (res.data && res.data.generated) {
+        setSelfPersona(res.data)
+        loadPersonalities() // refresh the "trained" flag on the self option
+        updateMessage('self-persona-train', `✅ Learned your style from ${res.data.messageCount} messages`)
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || 'Training failed'
+      updateMessage('self-persona-train', `⚠️ ${msg}`)
+      alert('Could not train your persona: ' + msg)
+    } finally {
+      setTrainingSelf(false)
+      setTimeout(() => completeJob('self-persona-train'), 2500)
     }
   }
 
@@ -570,7 +608,43 @@ export default function WhatsApp() {
               <button onClick={() => setShowBotSelector(false)}>×</button>
             </div>
             <div className="modal-body">
-              
+
+              {/* Your Persona — "Just Like Me" */}
+              <div className="self-persona-section">
+                <div className="self-persona-head">
+                  <h4>🪞 Your Persona</h4>
+                  {selfPersona?.generated ? (
+                    <span className="persona-badge trained">
+                      ✓ Trained · {selfPersona.messageCount} msgs
+                    </span>
+                  ) : (
+                    <span className="persona-badge untrained">Not trained</span>
+                  )}
+                </div>
+                <p className="muted">
+                  Train the bot to reply in <strong>your own</strong> texting style — it studies your
+                  past messages to learn your tone, slang and quirks. Then pick
+                  <strong> “{'🪞 Just Like Me (You)'}”</strong> as a group’s personality below.
+                </p>
+                <button
+                  className="train-persona-btn"
+                  onClick={trainSelfPersona}
+                  disabled={trainingSelf}
+                >
+                  {trainingSelf
+                    ? '🧠 Analyzing your messages…'
+                    : selfPersona?.generated
+                    ? '🔄 Retrain on my messages'
+                    : '✨ Train on my messages'}
+                </button>
+                {selfPersona?.generated && selfPersona.profile && (
+                  <details className="persona-profile">
+                    <summary>What the AI learned about you</summary>
+                    <p>{selfPersona.profile}</p>
+                  </details>
+                )}
+              </div>
+
               {/* Selected Groups with Personality */}
               {botGroups.length > 0 && (
                 <div className="selected-groups-section">

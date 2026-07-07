@@ -633,7 +633,7 @@ function initializeClient() {
         (g) => g.id === chat.id._serialized
       );
       const personalityKey = groupConfig?.personality || "hyderabadi";
-      const personality = BOT_PERSONALITIES[personalityKey];
+      const personality = getPersonalityById(personalityKey);
 
       console.log(`   🎭 Using personality: ${personality.name}`);
 
@@ -2273,6 +2273,178 @@ AVOID:
   },
 };
 
+// ============================================================
+// "Just Like Me" — a self-personality built from the account
+// owner's OWN messages, so the bot can imitate how they text.
+// ============================================================
+const SELF_PERSONALITY_FILE = path.join(__dirname, "self_personality.json");
+const SELF_PERSONALITY_NAME = "🪞 Just Like Me (You)";
+let selfPersonality = null; // { profile, prompt, messageCount, sampledCount, generatedAt }
+
+function loadSelfPersonality() {
+  try {
+    if (fs.existsSync(SELF_PERSONALITY_FILE)) {
+      selfPersonality = JSON.parse(
+        fs.readFileSync(SELF_PERSONALITY_FILE, "utf8")
+      );
+      console.log(
+        `🪞 Loaded self-personality (trained on ${selfPersonality.messageCount} messages)`
+      );
+    }
+  } catch (err) {
+    console.log("⚠️ Could not load self-personality:", err.message);
+    selfPersonality = null;
+  }
+}
+
+function saveSelfPersonality() {
+  try {
+    fs.writeFileSync(
+      SELF_PERSONALITY_FILE,
+      JSON.stringify(selfPersonality, null, 2)
+    );
+  } catch (err) {
+    console.log("⚠️ Could not save self-personality:", err.message);
+  }
+}
+
+// Resolve a personality key to a { name, prompt } object. Handles the dynamic
+// "self" persona and falls back safely for unknown keys (so the bot never
+// crashes on a bad/removed key).
+function getPersonalityById(key) {
+  if (key === "self") {
+    if (selfPersonality && selfPersonality.prompt) {
+      return { name: SELF_PERSONALITY_NAME, prompt: selfPersonality.prompt };
+    }
+    // Selected but not trained yet — keep the bot working with a neutral voice.
+    return {
+      name: "Just Like Me (not trained yet)",
+      prompt: BOT_PERSONALITIES.professional.prompt,
+    };
+  }
+  return BOT_PERSONALITIES[key] || BOT_PERSONALITIES.hyderabadi;
+}
+
+// Gather the account owner's OWN messages (fromMe) across recent chats, so we
+// have raw material to analyse their texting style. Bounded so it stays fast.
+async function collectOwnMessages(opts = {}) {
+  const maxMessages = opts.maxMessages || 250;
+  const maxChats = opts.maxChats || 30;
+  const perChat = opts.perChat || 60;
+
+  let chatIds = allChats.map((c) => c.id);
+  if (chatIds.length === 0) {
+    const chats = await client.getChats();
+    chatIds = chats.map((c) => c.id._serialized);
+  }
+
+  const seen = new Set();
+  const collected = [];
+  for (const id of chatIds.slice(0, maxChats)) {
+    if (collected.length >= maxMessages) break;
+    try {
+      const chat = await client.getChatById(id);
+      const msgs = await chat.fetchMessages({ limit: perChat });
+      for (const m of msgs) {
+        if (!m.fromMe) continue; // only the owner's own messages
+        const body = (m.body || "").trim();
+        if (!body) continue;
+        if (body.length > 500) continue; // skip forwards / long pastes
+        if (/^https?:\/\/\S+$/i.test(body)) continue; // skip bare links
+        const key = body.toLowerCase();
+        if (seen.has(key)) continue; // dedupe repeats
+        seen.add(key);
+        collected.push(body);
+        if (collected.length >= maxMessages) break;
+      }
+    } catch (_) {
+      // Skip chats we can't read.
+    }
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  return collected;
+}
+
+// Analyse the owner's messages into a reusable style profile + an imitation
+// prompt, then cache it to disk.
+async function generateSelfPersonality() {
+  const model = getGeminiModel();
+  if (!model) {
+    throw new Error("AI engine not configured (check OLLAMA_HOSTS)");
+  }
+
+  const messages = await collectOwnMessages();
+  if (messages.length < 15) {
+    throw new Error(
+      `Not enough of your own messages found to learn from (found ${messages.length}). Chat a bit more, let your chats sync, then try again.`
+    );
+  }
+
+  // Bound the prompt: take messages until ~8000 chars.
+  const sample = [];
+  let chars = 0;
+  for (const m of messages) {
+    if (chars > 8000) break;
+    sample.push(m);
+    chars += m.length + 2;
+  }
+
+  const analysisPrompt = `You are a behavioural linguist. Below are real WhatsApp messages written by ONE person (the account owner). Study them and produce a precise STYLE PROFILE that another AI can follow to convincingly imitate how this person texts.
+
+Describe, using ONLY evidence from the messages:
+- Tone & attitude (casual/formal, warm/blunt, humour style)
+- Languages & code-switching (e.g. Hindi-English mix) and the signature slang words they actually use
+- Vocabulary, catchphrases, greetings and sign-offs they repeat (quote a few real ones)
+- Typical message length, punctuation, capitalisation and abbreviation habits
+- Emoji usage (which ones, how often)
+- Any other quirks
+
+Messages:
+${sample.map((m, i) => `${i + 1}. ${m}`).join("\n")}
+
+Write a concise profile UNDER 220 words as direct, second-person guidance ("You tend to..."). Quote a few of their real signature words/phrases. Do NOT invent traits that aren't evidenced.`;
+
+  const profile = await queueAIRequest(async () => {
+    const result = await retryWithBackoff(
+      async (altModel) => (altModel || model).generateContent(analysisPrompt),
+      3,
+      2000
+    );
+    return result.response.text().trim();
+  }, 5);
+
+  if (!profile) {
+    throw new Error("The AI engine didn't return a persona. Please try again.");
+  }
+
+  const prompt = `You ARE the owner of this WhatsApp account. Reply in the group EXACTLY as they would — same tone, slang, language mix, emojis and message length. Never sound like a generic AI assistant.
+
+YOUR STYLE PROFILE (how you text):
+${profile}
+
+RULES:
+- Mirror their voice precisely: their brevity, punctuation, capitalisation and favourite words/phrases.
+- Use the same languages and slang they use.
+- Still answer the question or respond meaningfully underneath the style.
+- Keep it to 1-3 short sentences unless they'd naturally write more.`;
+
+  selfPersonality = {
+    profile,
+    prompt,
+    messageCount: messages.length,
+    sampledCount: sample.length,
+    generatedAt: new Date().toISOString(),
+  };
+  saveSelfPersonality();
+  console.log(
+    `🪞 Self-personality trained on ${messages.length} messages (${sample.length} sampled)`
+  );
+  return selfPersonality;
+}
+
+// Load any previously trained self-personality on startup.
+loadSelfPersonality();
+
 // Pre-load conversation memory for bot-enabled groups
 async function preloadBotMemory() {
   if (!isReady || !botConfig.enabled || botConfig.groups.length === 0) {
@@ -2359,7 +2531,50 @@ app.get("/api/bot/personalities", (req, res) => {
     id: key,
     name: BOT_PERSONALITIES[key].name,
   }));
+  // The special "self" persona imitates the logged-in user.
+  personalities.push({
+    id: "self",
+    name: SELF_PERSONALITY_NAME,
+    isSelf: true,
+    trained: Boolean(selfPersonality && selfPersonality.prompt),
+  });
   res.json({ personalities });
+});
+
+// Self-personality status.
+app.get("/api/bot/self-personality", (req, res) => {
+  if (!selfPersonality || !selfPersonality.prompt) {
+    return res.json({ generated: false });
+  }
+  res.json({
+    generated: true,
+    profile: selfPersonality.profile,
+    messageCount: selfPersonality.messageCount,
+    sampledCount: selfPersonality.sampledCount,
+    generatedAt: selfPersonality.generatedAt,
+  });
+});
+
+// (Re)train the self-personality by analysing the owner's own messages.
+app.post("/api/bot/self-personality/generate", async (req, res) => {
+  if (!isReady) {
+    return res.status(503).json({ error: "WhatsApp not connected" });
+  }
+  try {
+    console.log("🪞 Building self-personality from your messages...");
+    const result = await generateSelfPersonality();
+    res.json({
+      success: true,
+      generated: true,
+      profile: result.profile,
+      messageCount: result.messageCount,
+      sampledCount: result.sampledCount,
+      generatedAt: result.generatedAt,
+    });
+  } catch (err) {
+    console.error("❌ Self-personality generation failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post("/api/bot/config", async (req, res) => {
@@ -2617,7 +2832,7 @@ async function checkBotMessages() {
           (g) => g.id === chat.id._serialized
         );
         const personalityKey = groupConfig?.personality || "hyderabadi";
-        const personality = BOT_PERSONALITIES[personalityKey];
+        const personality = getPersonalityById(personalityKey);
 
         console.log(`   🎭 Using personality: ${personality.name}`);
 
@@ -2722,7 +2937,7 @@ app.use("/ui", (req, res, next) => {
 });
 
 // Start server
-const PORT = 8002;
+const PORT = process.env.WHATSAPP_API_PORT || 8002;
 
 app.listen(PORT, () => {
   console.log("🚀 ContextAI WhatsApp Chat Analyzer");
@@ -2735,25 +2950,30 @@ app.listen(PORT, () => {
   console.log("🔄 Initializing WhatsApp...\n");
 });
 
-// Initialize WhatsApp
-initializeClient();
+// Initialize WhatsApp. Set SKIP_WA_INIT=1 to run the API without launching the
+// browser (health checks / CI / testing the non-WhatsApp endpoints).
+if (process.env.SKIP_WA_INIT) {
+  console.log("⏭️  SKIP_WA_INIT set — API is up without the WhatsApp browser.");
+} else {
+  initializeClient();
 
-// Add error event listener
-client.on("error", (error) => {
-  console.error("❌ Client error:", error);
-});
-
-// Add remote_session_saved event
-client.on("remote_session_saved", () => {
-  console.log("💾 Remote session saved");
-});
-
-try {
-  client.initialize().catch((err) => {
-    console.error("❌ Initialization error:", err);
+  // Add error event listener
+  client.on("error", (error) => {
+    console.error("❌ Client error:", error);
   });
-} catch (err) {
-  console.error("❌ Failed to start client:", err);
+
+  // Add remote_session_saved event
+  client.on("remote_session_saved", () => {
+    console.log("💾 Remote session saved");
+  });
+
+  try {
+    client.initialize().catch((err) => {
+      console.error("❌ Initialization error:", err);
+    });
+  } catch (err) {
+    console.error("❌ Failed to start client:", err);
+  }
 }
 
 // Graceful shutdown

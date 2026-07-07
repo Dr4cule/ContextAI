@@ -48,6 +48,7 @@ yarn-error.log*
 # Cached/generated state files generated at runtime
 .run-logs/
 backend/summaries.json
+backend/self_personality.json
 server/rag_store.json
 backend/contextai_discord_summaries/
 

@@ -269,6 +269,28 @@ button:disabled{opacity:0.5;cursor:not-allowed}
 .modal-body{padding:20px 22px;overflow-y:auto}
 .modal-body p.muted{margin-bottom:16px}
 
+/* Self-persona ("Just Like Me") panel */
+.self-persona-section{
+  margin-bottom:22px;padding:16px;border-radius:var(--r);
+  background:var(--accent-soft);border:1px solid var(--accent-border);
+}
+.self-persona-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.self-persona-head h4{margin:0;font-size:14px;color:var(--text)}
+.self-persona-section p.muted{margin-bottom:14px;font-size:12.5px;line-height:1.6}
+.persona-badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;white-space:nowrap}
+.persona-badge.trained{color:var(--green);background:rgba(var(--green-rgb),0.12);border:1px solid rgba(var(--green-rgb),0.3)}
+.persona-badge.untrained{color:var(--muted);background:var(--surface-2);border:1px solid var(--border)}
+.train-persona-btn{
+  width:100%;padding:11px 16px;border-radius:var(--r-sm);border:none;
+  background:var(--accent-grad);color:#fff;font-family:inherit;font-size:13px;font-weight:650;
+  transition:all 0.2s var(--ease);box-shadow:0 6px 16px rgba(var(--accent-rgb),0.32);
+}
+.train-persona-btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 10px 24px rgba(var(--accent-rgb),0.46)}
+.train-persona-btn:disabled{opacity:0.6}
+.persona-profile{margin-top:12px;font-size:12.5px}
+.persona-profile summary{cursor:pointer;color:var(--accent-2);font-weight:600;user-select:none}
+.persona-profile p{margin-top:8px;padding:12px;background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--text-dim);line-height:1.7;white-space:pre-wrap}
+
 .selected-groups-section{margin-bottom:22px}
 .selected-groups-section h4{font-size:13px;color:var(--green);margin-bottom:12px}
 .selected-group-card{
