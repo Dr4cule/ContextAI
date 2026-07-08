@@ -1,8 +1,8 @@
 # ContextAI — full stack in one command:  docker compose up --build
 #
-# Requires Ollama running on the HOST machine (e.g. `ollama serve`). The
-# containers reach it via host.docker.internal. Override OLLAMA_HOSTS (and the
-# optional DISCORD_BOT_TOKEN) by copying .env.docker.example to .env.
+# Requires Ollama running on the HOST machine (e.g. `ollama serve`). Backend
+# services use host networking so they can reach the host's loopback Ollama at
+# http://localhost:11434 without changing Ollama's bind address.
 #
 # After it's up:
 #   UI        -> http://localhost:5173
@@ -18,15 +18,12 @@ services:
     image: contextai-rag
     container_name: contextai-rag
     environment:
-      OLLAMA_HOSTS: ${OLLAMA_HOSTS:-http://host.docker.internal:11434}
+      OLLAMA_HOSTS: ${OLLAMA_HOSTS:-http://localhost:11434}
       RAG_STORE_FILE: /app/data/rag_store.json
       PORT: "3000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    network_mode: host
     volumes:
       - rag-data:/app/data
-    ports:
-      - "3000:3000"
     restart: unless-stopped
 
   whatsapp:
@@ -37,16 +34,13 @@ services:
     init: true
     shm_size: "1gb"
     environment:
-      OLLAMA_HOSTS: ${OLLAMA_HOSTS:-http://host.docker.internal:11434}
-      RAG_SERVER_URL: http://rag:3000
+      OLLAMA_HOSTS: ${OLLAMA_HOSTS:-http://localhost:11434}
+      RAG_SERVER_URL: http://localhost:3000
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    network_mode: host
     volumes:
       - wa-auth:/app/.wwebjs_auth
       - wa-cache:/app/.wwebjs_cache
-    ports:
-      - "8002:8002"
     depends_on:
       - rag
     restart: unless-stopped
@@ -58,13 +52,10 @@ services:
     command: node discord_api.js
     init: true
     environment:
-      OLLAMA_HOSTS: ${OLLAMA_HOSTS:-http://host.docker.internal:11434}
-      RAG_SERVER_URL: http://rag:3000
+      OLLAMA_HOSTS: ${OLLAMA_HOSTS:-http://localhost:11434}
+      RAG_SERVER_URL: http://localhost:3000
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "8004:8004"
+    network_mode: host
     depends_on:
       - rag
     restart: unless-stopped

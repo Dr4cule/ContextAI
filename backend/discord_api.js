@@ -9,9 +9,11 @@ const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
 const { Client, GatewayIntentBits } = require("discord.js");
-const { createModel, getStatus, HOSTS, TEXT_MODEL } = require("./llm");
 
+// Load environment variables before initializing the shared LLM client.
 require("dotenv").config();
+
+const { createModel, getStatus, HOSTS, TEXT_MODEL } = require("./llm");
 
 const app = express();
 app.use(cors());

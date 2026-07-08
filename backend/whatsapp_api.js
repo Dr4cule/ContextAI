@@ -12,9 +12,12 @@ const qrcode = require("qrcode");
 const fs = require("fs");
 const fsPromises = require("fs").promises;
 const path = require("path");
+
+// Load environment variables before initializing the shared LLM client.
+require("dotenv").config();
+
 const { createModel, getStatus, HOSTS, TEXT_MODEL } = require("./llm");
 const sharp = require("sharp");
-
 const axios = require("axios");
 const projectMapping = require("./project_mapping.json");
 
@@ -25,9 +28,6 @@ const RAG_SERVER_URL = (
 ).replace(/\/+$/, "");
 const INGEST_SERVER_URL = `${RAG_SERVER_URL}/api/v1/ingest`;
 const RAG_ASK_URL = `${RAG_SERVER_URL}/api/v1/ask`;
-
-// Load environment variables
-require("dotenv").config();
 
 const app = express();
 app.use(cors());
